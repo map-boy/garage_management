@@ -1,36 +1,15 @@
-import { useState, useEffect } from 'react';
-import { Invoice } from '../types';
-import { invoiceService } from '../services/invoiceService';
+﻿import { Invoice } from '../types';
+import { useGarageCollection } from './useGarageCollection';
 
 export function useInvoices(clientId?: string) {
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const { items, save, remove } = useGarageCollection<Invoice>('invoices');
+  const invoices = clientId ? items.filter(i => i.clientId === clientId) : items;
 
-  const refresh = () => {
-    if (clientId) {
-      setInvoices(invoiceService.getByClientId(clientId));
-    } else {
-      setInvoices(invoiceService.getAll());
-    }
+  return {
+    invoices,
+    addInvoice: (i: Invoice) => save(i),
+    updateInvoice: (i: Invoice) => save(i),
+    deleteInvoice: (id: string) => remove(id),
+    refresh: () => {},
   };
-
-  useEffect(() => {
-    refresh();
-  }, [clientId]);
-
-  const addInvoice = (i: Invoice) => {
-    invoiceService.save(i);
-    refresh();
-  };
-
-  const updateInvoice = (i: Invoice) => {
-    invoiceService.save(i);
-    refresh();
-  };
-
-  const deleteInvoice = (id: string) => {
-    invoiceService.deleteById(id);
-    refresh();
-  };
-
-  return { invoices, addInvoice, updateInvoice, deleteInvoice, refresh };
 }

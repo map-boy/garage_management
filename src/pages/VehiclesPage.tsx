@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import { useVehicles } from '../hooks/useVehicles';
 import { useClients } from '../hooks/useClients';
 import { Table, TableRow, TableCell } from '../components/ui/Table';
@@ -183,7 +183,8 @@ export function VehiclesPage() {
                 type="number" required
                 className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
                 value={formData.year}
-                onChange={(e) => setFormData({...formData, year: parseInt(e.target.value) || 2024})}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setFormData({...formData, year: e.target.value === '' ? '' : parseInt(e.target.value)})}
               />
             </div>
           </div>
@@ -195,7 +196,8 @@ export function VehiclesPage() {
                 type="number" required
                 className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
                 value={formData.mileage}
-                onChange={(e) => setFormData({...formData, mileage: parseInt(e.target.value) || 0})}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setFormData({...formData, mileage: e.target.value === '' ? '' : parseInt(e.target.value)})}
               />
             </div>
             <div className="space-y-1">

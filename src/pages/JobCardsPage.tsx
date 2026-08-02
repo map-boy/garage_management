@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useJobs } from '../hooks/useJobs';
 import { useVehicles } from '../hooks/useVehicles';
@@ -8,9 +8,11 @@ import { Modal } from '../components/ui/Modal';
 import { Plus, Search, Filter, Wrench } from 'lucide-react';
 import { generateId } from '../lib/utils';
 import { JOB_STATUSES } from '../lib/constants';
+import { settingsService } from '../services/settingsService';
 import { JobCard as JobCardType } from '../types';
 
 export function JobCardsPage() {
+  const currency = settingsService.get().currency;
   const navigate = useNavigate();
   const { jobs, addJob } = useJobs();
   const { vehicles } = useVehicles();
@@ -42,7 +44,7 @@ export function JobCardsPage() {
       description: formData.description,
       status: 'Pending',
       partsUsed: [],
-      laborCost: formData.laborCost,
+      laborCost: Number(formData.laborCost) || 0,
       startedAt: new Date().toISOString(),
     };
     addJob(newJob);
@@ -140,12 +142,13 @@ export function JobCardsPage() {
             />
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Estimated Labor Cost (KES)</label>
+            <label className="text-xs font-bold text-gray-500 uppercase">Estimated Labor Cost ({currency})</label>
             <input 
               type="number"
               className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
               value={formData.laborCost}
-              onChange={(e) => setFormData({...formData, laborCost: parseFloat(e.target.value) || 0})}
+              onFocus={(e) => e.target.select()}
+              onChange={(e) => setFormData({...formData, laborCost: e.target.value === '' ? '' : parseFloat(e.target.value)})}
             />
           </div>
           <div className="flex justify-end gap-3 pt-4">
@@ -157,3 +160,4 @@ export function JobCardsPage() {
     </div>
   );
 }
+

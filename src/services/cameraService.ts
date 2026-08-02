@@ -1,21 +1,20 @@
-import { CAMERA_STREAM_URL } from '../lib/constants';
+﻿import { settingsService } from './settingsService';
 
 export const cameraService = {
   getStreamUrl: (): string => {
-    return CAMERA_STREAM_URL;
+    return settingsService.get().cameraStreamUrl;
   },
-  getStatus: async (): Promise<'online' | 'offline'> => {
+  getStatus: async (): Promise<'online' | 'offline' | 'not_configured'> => {
+    const url = settingsService.get().cameraStreamUrl;
+    if (!url) return 'not_configured';
     try {
-      // Small timeout since it's just a status check
       const controller = new AbortController();
       const id = setTimeout(() => controller.abort(), 3000);
-      
-      const response = await fetch(CAMERA_STREAM_URL, { 
+      await fetch(url, {
         method: 'HEAD',
         signal: controller.signal,
-        mode: 'no-cors' 
+        mode: 'no-cors'
       });
-      
       clearTimeout(id);
       return 'online';
     } catch (e) {

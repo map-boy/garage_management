@@ -1,30 +1,14 @@
-import { useState, useEffect } from 'react';
-import { Client } from '../types';
-import { clientService } from '../services/clientService';
+﻿import { Client } from '../types';
+import { useGarageCollection } from './useGarageCollection';
 
 export function useClients() {
-  const [clients, setClients] = useState<Client[]>([]);
+  const { items, save, remove } = useGarageCollection<Client>('clients');
 
-  const refresh = () => setClients(clientService.getAll());
-
-  useEffect(() => {
-    refresh();
-  }, []);
-
-  const addClient = (c: Client) => {
-    clientService.save(c);
-    refresh();
+  return {
+    clients: items,
+    addClient: (c: Client) => save(c),
+    updateClient: (c: Client) => save(c),
+    deleteClient: (id: string) => remove(id),
+    refresh: () => {}, // no-op: onSnapshot keeps data live automatically
   };
-
-  const updateClient = (c: Client) => {
-    clientService.save(c);
-    refresh();
-  };
-
-  const deleteClient = (id: string) => {
-    clientService.deleteById(id);
-    refresh();
-  };
-
-  return { clients, addClient, updateClient, deleteClient, refresh };
 }

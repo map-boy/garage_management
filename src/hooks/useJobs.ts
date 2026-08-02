@@ -1,36 +1,15 @@
-import { useState, useEffect } from 'react';
-import { JobCard } from '../types';
-import { jobService } from '../services/jobService';
+﻿import { JobCard } from '../types';
+import { useGarageCollection } from './useGarageCollection';
 
 export function useJobs(vehicleId?: string) {
-  const [jobs, setJobs] = useState<JobCard[]>([]);
+  const { items, save, remove } = useGarageCollection<JobCard>('jobs');
+  const jobs = vehicleId ? items.filter(j => j.vehicleId === vehicleId) : items;
 
-  const refresh = () => {
-    if (vehicleId) {
-      setJobs(jobService.getByVehicleId(vehicleId));
-    } else {
-      setJobs(jobService.getAll());
-    }
+  return {
+    jobs,
+    addJob: (j: JobCard) => save(j),
+    updateJob: (j: JobCard) => save(j),
+    deleteJob: (id: string) => remove(id),
+    refresh: () => {},
   };
-
-  useEffect(() => {
-    refresh();
-  }, [vehicleId]);
-
-  const addJob = (j: JobCard) => {
-    jobService.save(j);
-    refresh();
-  };
-
-  const updateJob = (j: JobCard) => {
-    jobService.save(j);
-    refresh();
-  };
-
-  const deleteJob = (id: string) => {
-    jobService.deleteById(id);
-    refresh();
-  };
-
-  return { jobs, addJob, updateJob, deleteJob, refresh };
 }

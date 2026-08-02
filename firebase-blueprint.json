@@ -1,0 +1,124 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System users including employees and customers",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["super_admin", "owner", "manager", "mechanic", "cashier", "receptionist", "store_keeper", "security", "customer"] },
+        "branchId": { "type": "string" },
+        "phone": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastLogin": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Vehicles registered in the system",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "vin": { "type": "string" },
+        "plateNumber": { "type": "string" },
+        "make": { "type": "string" },
+        "model": { "type": "string" },
+        "year": { "type": "integer" },
+        "ownerId": { "type": "string" },
+        "mileage": { "type": "integer" },
+        "fuelType": { "type": "string" },
+        "images": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["plateNumber", "ownerId"]
+    },
+    "JobCard": {
+      "title": "Job Card",
+      "description": "Repair and maintenance job records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "vehicleId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "mechanicId": { "type": "string" },
+        "status": { "type": "string", "enum": ["waiting", "diagnosing", "in_progress", "waiting_parts", "completed", "delivered"] },
+        "description": { "type": "string" },
+        "diagnosis": { "type": "string" },
+        "estimatedCost": { "type": "number" },
+        "actualCost": { "type": "number" },
+        "estimatedCompletion": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "checkList": { "type": "object" },
+        "images": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["vehicleId", "customerId", "status"]
+    },
+    "InventoryItem": {
+      "title": "Inventory Item",
+      "description": "Spare parts and shop items",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sku": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "integer" },
+        "minQuantity": { "type": "integer" },
+        "price": { "type": "number" },
+        "supplier": { "type": "string" },
+        "location": { "type": "string" }
+      },
+      "required": ["sku", "name", "quantity"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial records of payments and expenses",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "category": { "type": "string" },
+        "amount": { "type": "number" },
+        "jobCardId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "users": {
+      "schema": "User",
+      "description": "Central user profiles"
+    },
+    "vehicles": {
+      "schema": "Vehicle",
+      "description": "Vehicle registry"
+    },
+    "jobCards": {
+      "schema": "JobCard",
+      "description": "Repair jobs"
+    },
+    "inventory": {
+      "schema": "InventoryItem",
+      "description": "Parts inventory"
+    },
+    "transactions": {
+      "schema": "Transaction",
+      "description": "Ledger"
+    },
+    "attendance": {
+      "schema": "object",
+      "description": "Employee attendance logs"
+    },
+    "branches": {
+      "schema": "object",
+      "description": "Multi-branch setup"
+    }
+  }
+}

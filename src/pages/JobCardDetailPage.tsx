@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+﻿import React, { useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useJobs } from '../hooks/useJobs';
 import { useVehicles } from '../hooks/useVehicles';
@@ -22,7 +22,8 @@ import {
   Trash2
 } from 'lucide-react';
 import { formatCurrency, formatDate, generateId } from '../lib/utils';
-import { JOB_STATUSES, TAX_RATE } from '../lib/constants';
+import { JOB_STATUSES } from '../lib/constants';
+import { settingsService } from '../services/settingsService';
 import { JobStatus, Invoice } from '../types';
 
 export function JobCardDetailPage() {
@@ -93,13 +94,30 @@ export function JobCardDetailPage() {
       clientId: client?.id || '',
       lineItems,
       laborCost: job.laborCost,
-      taxRate: TAX_RATE,
+      taxRate: settingsService.get().taxRate,
       status: 'Unpaid',
       issuedAt: new Date().toISOString()
     };
 
     addInvoice(newInvoice);
     navigate(`/invoices/${newInvoice.id}`);
+  };
+
+  const handleUpdatePartQty = (partId: string, newQty: number) => {
+    const existing = job.partsUsed.find(p => p.partId === partId);
+    if (!existing) return;
+    const diff = newQty - existing.quantity;
+    const newParts = job.partsUsed.map(p => p.partId === partId ? { ...p, quantity: newQty } : p);
+    updateJob({ ...job, partsUsed: newParts });
+    if (diff !== 0) updateQuantity(partId, -diff);
+  };
+
+  const handleRemovePart = (partId: string) => {
+    const existing = job.partsUsed.find(p => p.partId === partId);
+    if (!existing) return;
+    const newParts = job.partsUsed.filter(p => p.partId !== partId);
+    updateJob({ ...job, partsUsed: newParts });
+    updateQuantity(partId, existing.quantity);
   };
 
   const totalPartsCost = job.partsUsed.reduce((acc, item) => {
@@ -165,7 +183,13 @@ export function JobCardDetailPage() {
                     </Button>
                   )}
                 </div>
-                <PartsUsedTable parts={job.partsUsed} allParts={stock} />
+                <PartsUsedTable
+                  parts={job.partsUsed}
+                  allParts={stock}
+                  editable={job.status !== 'Completed'}
+                  onUpdateQty={handleUpdatePartQty}
+                  onRemove={handleRemovePart}
+                />
               </div>
             </div>
           </div>
@@ -280,3 +304,5 @@ export function JobCardDetailPage() {
     </div>
   );
 }
+
+

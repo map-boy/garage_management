@@ -1,4 +1,4 @@
-import { useJobs } from './useJobs';
+﻿import { useJobs } from './useJobs';
 import { useInvoices } from './useInvoices';
 import { useStock } from './useStock';
 
@@ -8,15 +8,20 @@ export function useReports() {
   const { stock } = useStock();
 
   const getMonthlyRevenue = () => {
-    const revenueByMonth: Record<string, number> = {};
+    const revenueByMonth: Record<string, { value: number; sortKey: number }> = {};
     invoices.forEach(inv => {
       if (inv.status === 'Paid') {
-        const month = new Date(inv.issuedAt).toLocaleString('default', { month: 'short' });
+        const date = new Date(inv.issuedAt);
+        const label = date.toLocaleString('default', { month: 'short', year: '2-digit' });
+        const sortKey = date.getFullYear() * 12 + date.getMonth();
         const total = inv.lineItems.reduce((acc, item) => acc + (item.qty * item.unitCost), 0) + inv.laborCost;
-        revenueByMonth[month] = (revenueByMonth[month] || 0) + total;
+        if (!revenueByMonth[label]) revenueByMonth[label] = { value: 0, sortKey };
+        revenueByMonth[label].value += total;
       }
     });
-    return Object.entries(revenueByMonth).map(([name, value]) => ({ name, value }));
+    return Object.entries(revenueByMonth)
+      .sort((a, b) => a[1].sortKey - b[1].sortKey)
+      .map(([name, data]) => ({ name, value: data.value }));
   };
 
   const getTechnicianWorkload = () => {

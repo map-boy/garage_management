@@ -49,7 +49,7 @@ export function InvoiceDetailPage() {
         </div>
       </div>
 
-      <div className="print:shadow-none print:m-0">
+      <div className="print-area print:shadow-none print:m-0">
         <InvoiceTemplate 
           invoice={invoice} 
           client={client} 

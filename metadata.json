@@ -1,6 +1,6 @@
 {
-  "name": "GarageFlow GMS",
-  "description": "Professional African Garage Management System with Job Cards, Inventory, and Invoicing.",
-  "requestFramePermissions": [],
-  "majorCapabilities": []
+  "name": "SmartGarage Pro",
+  "description": "An all-in-one AI-powered garage management ecosystem for modern automotive service businesses.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["AI Analytics", "Real-time Monitoring", "Inventory Management", "Role-based Access Control"]
 }

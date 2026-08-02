@@ -1,4 +1,4 @@
-import { useReports } from '../hooks/useReports';
+﻿import { useReports } from '../hooks/useReports';
 import { RevenueBarChart } from '../components/charts/RevenueBarChart';
 import { TechnicianChart } from '../components/charts/TechnicianChart';
 import { formatCurrency } from '../lib/utils';
@@ -39,8 +39,8 @@ export function ReportsPage() {
         </div>
         <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
           <Users className="w-8 h-8 text-emerald-600 mb-4" />
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Staff Efficiency</p>
-          <h3 className="text-2xl font-black text-gray-900">{revenueData.length > 0 ? (totalRevenue / revenueData.length).toFixed(0) : 0} <span className="text-sm text-gray-400">/mo average</span></h3>
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Avg Monthly Revenue</p>
+          <h3 className="text-2xl font-black text-gray-900">{revenueData.length > 0 ? (totalRevenue / revenueData.length).toFixed(0) : 0} <span className="text-sm text-gray-400"></span></h3>
         </div>
         <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
           <Package className="w-8 h-8 text-rose-600 mb-4" />
@@ -91,3 +91,4 @@ export function ReportsPage() {
     </div>
   );
 }
+

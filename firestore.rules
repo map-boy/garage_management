@@ -1,0 +1,35 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() { return request.auth != null; }
+    function userProfile() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function userGarageId() { return userProfile().garageId; }
+    function userRole() { return userProfile().role; }
+    function belongsToGarage(garageId) { return isSignedIn() && userGarageId() == garageId; }
+    function isStaffRole() { return userRole() in ['owner','manager','technician','receptionist','store_keeper','cashier','BOSS']; }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isSignedIn() && request.auth.uid == userId
+                    && request.resource.data.garageId == resource.data.garageId
+                    && request.resource.data.role == resource.data.role;
+    }
+
+    match /garages/{garageId} {
+      allow read: if belongsToGarage(garageId);
+      allow create: if isSignedIn() && request.auth.uid == garageId;
+      allow update: if belongsToGarage(garageId) && isStaffRole();
+
+      match /{collectionName}/{docId} {
+        allow read: if belongsToGarage(garageId);
+        allow write: if belongsToGarage(garageId) && isStaffRole();
+      }
+    }
+  }
+}
+

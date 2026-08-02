@@ -1,30 +1,14 @@
-import { useState, useEffect } from 'react';
-import { ServiceReminder } from '../types';
-import { reminderService } from '../services/reminderService';
+﻿import { ServiceReminder } from '../types';
+import { useGarageCollection } from './useGarageCollection';
 
 export function useReminders() {
-  const [reminders, setReminders] = useState<ServiceReminder[]>([]);
+  const { items, save, remove } = useGarageCollection<ServiceReminder>('reminders');
 
-  const refresh = () => setReminders(reminderService.getAll());
-
-  useEffect(() => {
-    refresh();
-  }, []);
-
-  const addReminder = (r: ServiceReminder) => {
-    reminderService.save(r);
-    refresh();
+  return {
+    reminders: items,
+    addReminder: (r: ServiceReminder) => save(r),
+    updateReminder: (r: ServiceReminder) => save(r),
+    deleteReminder: (id: string) => remove(id),
+    refresh: () => {},
   };
-
-  const updateReminder = (r: ServiceReminder) => {
-    reminderService.save(r);
-    refresh();
-  };
-
-  const deleteReminder = (id: string) => {
-    reminderService.deleteById(id);
-    refresh();
-  };
-
-  return { reminders, addReminder, updateReminder, deleteReminder, refresh };
 }

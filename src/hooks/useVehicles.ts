@@ -1,36 +1,15 @@
-import { useState, useEffect } from 'react';
-import { Vehicle } from '../types';
-import { vehicleService } from '../services/vehicleService';
+﻿import { Vehicle } from '../types';
+import { useGarageCollection } from './useGarageCollection';
 
 export function useVehicles(clientId?: string) {
-  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const { items, save, remove } = useGarageCollection<Vehicle>('vehicles');
+  const vehicles = clientId ? items.filter(v => v.clientId === clientId) : items;
 
-  const refresh = () => {
-    if (clientId) {
-      setVehicles(vehicleService.getByClientId(clientId));
-    } else {
-      setVehicles(vehicleService.getAll());
-    }
+  return {
+    vehicles,
+    addVehicle: (v: Vehicle) => save(v),
+    updateVehicle: (v: Vehicle) => save(v),
+    deleteVehicle: (id: string) => remove(id),
+    refresh: () => {},
   };
-
-  useEffect(() => {
-    refresh();
-  }, [clientId]);
-
-  const addVehicle = (v: Vehicle) => {
-    vehicleService.save(v);
-    refresh();
-  };
-
-  const updateVehicle = (v: Vehicle) => {
-    vehicleService.save(v);
-    refresh();
-  };
-
-  const deleteVehicle = (id: string) => {
-    vehicleService.deleteById(id);
-    refresh();
-  };
-
-  return { vehicles, addVehicle, updateVehicle, deleteVehicle, refresh };
 }

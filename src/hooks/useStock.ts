@@ -1,35 +1,22 @@
-import { useState, useEffect } from 'react';
-import { Part } from '../types';
-import { stockService } from '../services/stockService';
+﻿import { Part } from '../types';
+import { useGarageCollection } from './useGarageCollection';
 
 export function useStock() {
-  const [stock, setStock] = useState<Part[]>([]);
-
-  const refresh = () => setStock(stockService.getAll());
-
-  useEffect(() => {
-    refresh();
-  }, []);
-
-  const addPart = (p: Part) => {
-    stockService.save(p);
-    refresh();
-  };
-
-  const updatePart = (p: Part) => {
-    stockService.save(p);
-    refresh();
-  };
-
-  const deletePart = (id: string) => {
-    stockService.deleteById(id);
-    refresh();
-  };
+  const { items, save, remove } = useGarageCollection<Part>('stock');
 
   const updateQuantity = (id: string, delta: number) => {
-    stockService.updateQuantity(id, delta);
-    refresh();
+    const part = items.find(p => p.id === id);
+    if (part) {
+      save({ ...part, quantity: part.quantity + delta });
+    }
   };
 
-  return { stock, addPart, updatePart, deletePart, updateQuantity, refresh };
+  return {
+    stock: items,
+    addPart: (p: Part) => save(p),
+    updatePart: (p: Part) => save(p),
+    deletePart: (id: string) => remove(id),
+    updateQuantity,
+    refresh: () => {},
+  };
 }

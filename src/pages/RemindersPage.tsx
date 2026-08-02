@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import { useReminders } from '../hooks/useReminders';
 import { useVehicles } from '../hooks/useVehicles';
 import { Button } from '../components/ui/Button';
@@ -17,7 +17,7 @@ export function RemindersPage() {
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [selectedReminder, setSelectedReminder] = useState<ServiceReminder | null>(null);
   const [formData, setFormData] = useState<Partial<ServiceReminder>>({
-    vehicleId: '', type: 'Full Service', dueDate: '', notes: '', isDone: false
+    vehicleId: '', type: 'Full Service', dueDate: '', dueTime: '09:00', notes: '', isDone: false
   });
 
   const sortedReminders = [...reminders].sort((a, b) => 
@@ -31,6 +31,7 @@ export function RemindersPage() {
       vehicleId: formData.vehicleId || '',
       type: formData.type as any,
       dueDate: formData.dueDate || '',
+      dueTime: formData.dueTime || '09:00',
       notes: formData.notes || '',
       isDone: false
     };
@@ -148,6 +149,15 @@ export function RemindersPage() {
                 className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
                 value={formData.dueDate}
                 onChange={(e) => setFormData({...formData, dueDate: e.target.value})}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-gray-500 uppercase">Due Time</label>
+              <input
+                type="time" required
+                className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
+                value={formData.dueTime}
+                onChange={(e) => setFormData({...formData, dueTime: e.target.value})}
               />
             </div>
           </div>

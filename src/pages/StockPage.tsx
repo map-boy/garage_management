@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import { useStock } from '../hooks/useStock';
 import { Table, TableRow, TableCell } from '../components/ui/Table';
 import { Button } from '../components/ui/Button';
@@ -7,9 +7,11 @@ import { Badge } from '../components/ui/Badge';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { Plus, Search, Package, Trash2, Edit, AlertCircle } from 'lucide-react';
 import { generateId, formatCurrency } from '../lib/utils';
+import { settingsService } from '../services/settingsService';
 import { Part } from '../types';
 
 export function StockPage() {
+  const currency = settingsService.get().currency;
   const { stock, addPart, updatePart, deletePart } = useStock();
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -175,7 +177,8 @@ export function StockPage() {
                 type="number" required
                 className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
                 value={formData.quantity}
-                onChange={(e) => setFormData({...formData, quantity: parseInt(e.target.value) || 0})}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setFormData({...formData, quantity: e.target.value === "" ? 0 : parseInt(e.target.value) || 0})}
               />
             </div>
             <div className="space-y-1">
@@ -184,16 +187,18 @@ export function StockPage() {
                 type="number" required
                 className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
                 value={formData.reorderLevel}
-                onChange={(e) => setFormData({...formData, reorderLevel: parseInt(e.target.value) || 5})}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setFormData({...formData, reorderLevel: e.target.value === "" ? 0 : parseInt(e.target.value) || 5})}
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Unit Cost (KES)</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">Unit Cost ({currency})</label>
               <input 
                 type="number" required
                 className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
                 value={formData.unitCost}
-                onChange={(e) => setFormData({...formData, unitCost: parseFloat(e.target.value) || 0})}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setFormData({...formData, unitCost: e.target.value === "" ? 0 : parseFloat(e.target.value) || 0})}
               />
             </div>
           </div>
@@ -225,3 +230,5 @@ export function StockPage() {
     </div>
   );
 }
+
+

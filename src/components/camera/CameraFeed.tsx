@@ -1,37 +1,71 @@
-import { useEffect, useRef } from 'react';
-import { CameraOff } from 'lucide-react';
+﻿import { useEffect, useRef, useState } from 'react';
+import Hls from 'hls.js';
+import { CameraOff, AlertTriangle } from 'lucide-react';
 
-export function CameraFeed({ url }: { url: string }) {
+export function CameraFeed({ url, label }: { url: string; label?: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // Note: Standard HTML5 video doesn't support HLS (.m3u8) without hls.js
-  // For this local-storage demo, we'll simulate the feed with a stable sample video
-  // that typically works in most browsers or show a placeholder.
-  
-  return (
-    <div className="relative aspect-video bg-black rounded-xl overflow-hidden group">
-      <div className="absolute inset-0 flex items-center justify-center">
-        <CameraOff className="w-12 h-12 text-gray-800 opacity-20" />
+  useEffect(() => {
+    setError(null);
+    const video = videoRef.current;
+    if (!video || !url) return;
+
+    let hls: Hls | null = null;
+
+    if (url.includes('.m3u8') && Hls.isSupported()) {
+      hls = new Hls();
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) setError('Unable to load camera stream. Check the URL or network connection.');
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl') || !url.includes('.m3u8')) {
+      video.src = url;
+      video.onerror = () => setError('Unable to load camera stream. Check the URL or network connection.');
+    } else {
+      setError('This browser cannot play HLS streams.');
+    }
+
+    return () => {
+      if (hls) hls.destroy();
+    };
+  }, [url]);
+
+  if (!url) {
+    return (
+      <div className="relative aspect-video bg-gray-900 rounded-xl overflow-hidden flex flex-col items-center justify-center gap-3 text-gray-500">
+        <CameraOff className="w-10 h-10" />
+        <p className="text-sm font-medium">No camera configured. Add a stream URL in Settings.</p>
       </div>
-      
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="relative aspect-video bg-gray-900 rounded-xl overflow-hidden flex flex-col items-center justify-center gap-3 text-amber-400">
+        <AlertTriangle className="w-10 h-10" />
+        <p className="text-sm font-medium text-center px-6">{error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative aspect-video bg-black rounded-xl overflow-hidden">
       <video
         ref={videoRef}
         autoPlay
         muted
-        loop
         playsInline
-        className="w-full h-full object-cover relative z-10"
-        src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+        controls
+        className="w-full h-full object-cover"
       />
-      
-      <div className="absolute top-4 left-4 z-20 bg-black/60 backdrop-blur-md px-3 py-1 rounded text-[10px] text-white font-mono uppercase tracking-widest flex items-center gap-2">
-        <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
-        Direct Feed: Tech-Bay 01
-      </div>
-      
-      <div className="absolute bottom-0 inset-x-0 h-1 z-20 bg-blue-500/30">
-        <div className="h-full bg-blue-500 w-1/3 animate-ping duration-[3000ms]"></div>
-      </div>
+      {label && (
+        <div className="absolute top-4 left-4 z-20 bg-black/60 backdrop-blur-md px-3 py-1 rounded text-[10px] text-white font-mono uppercase tracking-widest flex items-center gap-2">
+          <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+          {label}
+        </div>
+      )}
     </div>
   );
 }
