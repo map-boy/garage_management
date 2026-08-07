@@ -139,6 +139,7 @@ export const onInvoicePaid = onDocumentUpdated(
         event.params.invoiceId
       );
       const sessionId = await getGarageSessionId(garageId);
+    await ensureSessionActive(sessionId);
       await sendWhatsAppTemplate(
         openwaApiKey.value(),
         sessionId,
@@ -171,6 +172,7 @@ export const sendManualWhatsApp = onCall(
     }
     try {
       const sessionId = await getGarageSessionId(garageId);
+    await ensureSessionActive(sessionId);
       await sendWhatsAppText(openwaApiKey.value(), sessionId, formatPhone(phoneNumber), message);
       return {success: true};
     } catch (error: any) {
@@ -284,6 +286,7 @@ export const sendScheduledMessages = onSchedule(
         await ensureVmRunning();
         await waitForVmReady();
         const sessionId = await getGarageSessionId(garageId);
+        await ensureSessionActive(sessionId);
         const clientsSnap = await admin.firestore()
           .collection("garages").doc(garageId)
           .collection("clients").get();
@@ -522,6 +525,30 @@ async function waitForVmReady(): Promise<void> {
   throw new Error("Timed out waiting for VM/WhatsApp service to become ready");
 }
 
+async function ensureSessionActive(sessionId: string): Promise<void> {
+  const apiKey = openwaApiKey.value();
+  await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/start`, {
+    method: "POST",
+    headers: {"X-API-Key": apiKey},
+  });
+  const maxWaitMs = 60000;
+  const intervalMs = 3000;
+  const startTime = Date.now();
+  while (Date.now() - startTime < maxWaitMs) {
+    const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}`, {
+      headers: {"X-API-Key": apiKey},
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      if (data.status === "connected" || data.status === "active") {
+        return;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`Timed out waiting for WhatsApp session ${sessionId} to become active`);
+}
+
 // Idle-checker: runs every 10 min. Stops the VM if no activity for 15+ min — saves cost
 // since the VM only needs to run right after an invoice is paid or a manual send.
 export const stopIdleVm = onSchedule(
@@ -541,6 +568,7 @@ export const stopIdleVm = onSchedule(
     }
   }
 );
+
 
 
 
