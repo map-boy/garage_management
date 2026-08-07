@@ -139,7 +139,7 @@ export const onInvoicePaid = onDocumentUpdated(
         event.params.invoiceId
       );
       const sessionId = await getGarageSessionId(garageId);
-    await ensureSessionActive(sessionId);
+      await ensureSessionActive(sessionId);
       await sendWhatsAppTemplate(
         openwaApiKey.value(),
         sessionId,
@@ -172,7 +172,7 @@ export const sendManualWhatsApp = onCall(
     }
     try {
       const sessionId = await getGarageSessionId(garageId);
-    await ensureSessionActive(sessionId);
+      await ensureSessionActive(sessionId);
       await sendWhatsAppText(openwaApiKey.value(), sessionId, formatPhone(phoneNumber), message);
       return {success: true};
     } catch (error: any) {
@@ -512,7 +512,7 @@ async function waitForVmReady(): Promise<void> {
   const startTime = Date.now();
   while (Date.now() - startTime < maxWaitMs) {
     try {
-      const res = await fetch(``, {method: "GET"});
+      const res = await fetch(`${openwaUrl.value()}`, {method: "GET"});
       if (res.ok || res.status === 404) {
         logger.info("OpenWA service is ready");
         return;
@@ -568,11 +568,4 @@ export const stopIdleVm = onSchedule(
     }
   }
 );
-
-
-
-
-
-
-
 
