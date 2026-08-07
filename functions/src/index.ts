@@ -59,7 +59,7 @@ async function checkAndIncrementQuota(garageId: string): Promise<boolean> {
 
 // ---- Auto-send WhatsApp when invoice is marked Paid ----
 export const onInvoicePaid = onDocumentUpdated(
-  {document: "garages/{garageId}/invoices/{invoiceId}", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
+  {document: "garages/{garageId}/invoices/{invoiceId}", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
   async (event) => {
     const before = event.data?.before.data();
     const after = event.data?.after.data();
@@ -158,7 +158,7 @@ export const onInvoicePaid = onDocumentUpdated(
 
 // ---- Manual admin send (boss dashboard) ----
 export const sendManualWhatsApp = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
+  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
   async (request) => {
     const {garageId, phoneNumber, message} = request.data;
     if (!garageId || !phoneNumber || !message) {
@@ -260,7 +260,7 @@ export const requestWhatsAppPairingCode = onCall(
 );
 
 export const wakeVm = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
+  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
   async () => {
     await ensureVmRunning();
     await waitForVmReady();
@@ -269,7 +269,7 @@ export const wakeVm = onCall(
 );
 
 export const restartWhatsAppSession = onCall(
-  {secrets: [openwaApiKey, openwaUrl]},
+  {secrets: [openwaApiKey, openwaUrl], timeoutSeconds: 120},
   async (request) => {
     const {garageId} = request.data;
     if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
@@ -283,7 +283,7 @@ export const restartWhatsAppSession = onCall(
 // (not UTC) means "today" always matches the garage's real local date,
 // so a message scheduled for a specific day never fires a day early/late.
 export const sendScheduledMessages = onSchedule(
-  {schedule: "0 8 * * *", timeZone: "Africa/Kigali", secrets: [openwaApiKey, openwaUrl]},
+  {schedule: "0 8 * * *", timeZone: "Africa/Kigali", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 300},
   async () => {
     const todayStr = new Intl.DateTimeFormat("en-CA", {
       timeZone: "Africa/Kigali",
@@ -588,5 +588,4 @@ export const stopIdleVm = onSchedule(
     }
   }
 );
-
 
