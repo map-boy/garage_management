@@ -1,4 +1,4 @@
-import {setGlobalOptions} from "firebase-functions";
+﻿import {setGlobalOptions} from "firebase-functions";
 import {onCall, HttpsError} from "firebase-functions/https";
 import {onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {onSchedule} from "firebase-functions/v2/scheduler";
@@ -14,6 +14,10 @@ setGlobalOptions({maxInstances: 10});
 
 const openwaApiKey = defineSecret("OPENWA_API_KEY");
 const openwaUrl = defineSecret("OPENWA_URL");
+const azureAppId = defineSecret("AZURE_APP_ID");
+const azurePassword = defineSecret("AZURE_PASSWORD");
+const azureTenant = defineSecret("AZURE_TENANT");
+const azureSubscriptionId = defineSecret("AZURE_SUBSCRIPTION_ID");
 const DEFAULT_WHATSAPP_LIMIT = 1000;
 
 // ---- OpenWA send helpers ----
@@ -55,7 +59,7 @@ async function checkAndIncrementQuota(garageId: string): Promise<boolean> {
 
 // ---- Auto-send WhatsApp when invoice is marked Paid ----
 export const onInvoicePaid = onDocumentUpdated(
-  {document: "garages/{garageId}/invoices/{invoiceId}", secrets: [openwaApiKey, openwaUrl]},
+  {document: "garages/{garageId}/invoices/{invoiceId}", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
   async (event) => {
     const before = event.data?.before.data();
     const after = event.data?.after.data();
@@ -79,6 +83,8 @@ export const onInvoicePaid = onDocumentUpdated(
     const garage = garageSnap.data();
     const garageName = garage?.garageName || "Your Garage";
 
+    await ensureVmRunning();
+    await waitForVmReady();
     const allowed = await checkAndIncrementQuota(garageId);
     if (!allowed) {
       logger.warn("WhatsApp quota exhausted", {garageId});
@@ -151,12 +157,14 @@ export const onInvoicePaid = onDocumentUpdated(
 
 // ---- Manual admin send (boss dashboard) ----
 export const sendManualWhatsApp = onCall(
-  {secrets: [openwaApiKey, openwaUrl]},
+  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
   async (request) => {
     const {garageId, phoneNumber, message} = request.data;
     if (!garageId || !phoneNumber || !message) {
       throw new HttpsError("invalid-argument", "garageId, phoneNumber and message are required");
     }
+    await ensureVmRunning();
+    await waitForVmReady();
     const allowed = await checkAndIncrementQuota(garageId);
     if (!allowed) {
       throw new HttpsError("resource-exhausted", "WhatsApp message quota exhausted for this garage");
@@ -273,6 +281,8 @@ export const sendScheduledMessages = onSchedule(
       if (!garageId) continue;
 
       try {
+        await ensureVmRunning();
+        await waitForVmReady();
         const sessionId = await getGarageSessionId(garageId);
         const clientsSnap = await admin.firestore()
           .collection("garages").doc(garageId)
@@ -439,3 +449,102 @@ async function sendWhatsAppTemplate(
     throw new Error(`OpenWA document send failed: ${await res.text()}`);
   }
 }
+
+// ---- Azure VM auto start/stop (save cost â€” VM only runs during business hours) ----
+const AZURE_RESOURCE_GROUP = "garage-whatsapp-rg";
+const AZURE_VM_NAME = "openwa-vm-azure";
+
+async function getAzureToken(): Promise<string> {
+  const res = await fetch(
+    `https://login.microsoftonline.com/${azureTenant.value()}/oauth2/token`,
+    {
+      method: "POST",
+      headers: {"Content-Type": "application/x-www-form-urlencoded"},
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: azureAppId.value(),
+        client_secret: azurePassword.value(),
+        resource: "https://management.azure.com/",
+      }),
+    }
+  );
+  const data: any = await res.json();
+  if (!res.ok) throw new Error(`Azure auth failed: ${JSON.stringify(data)}`);
+  return data.access_token;
+}
+
+async function azureVmAction(action: "start" | "deallocate"): Promise<void> {
+  const token = await getAzureToken();
+  const url = `https://management.azure.com/subscriptions/${azureSubscriptionId.value()}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/virtualMachines/${AZURE_VM_NAME}/${action}?api-version=2023-09-01`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {"Authorization": `Bearer ${token}`},
+  });
+  if (!res.ok && res.status !== 202) {
+    throw new Error(`Azure ${action} failed: ${await res.text()}`);
+  }
+  logger.info(`Azure VM ${action} triggered`, {vm: AZURE_VM_NAME});
+}
+
+// Stops (deallocates) the VM at 8:00 PM Kigali time (after business hours) â€” this is
+// what actually stops billing, since a deallocated VM is not charged for compute.
+export const stopGarageVm = onSchedule(
+  {schedule: "0 20 * * *", timeZone: "Africa/Kigali", secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
+  async () => {
+    await azureVmAction("deallocate");
+  }
+);
+
+
+async function ensureVmRunning(): Promise<void> {
+  const db = admin.firestore();
+  const stateRef = db.collection("system").doc("vmState");
+  await azureVmAction("start");
+  await stateRef.set({lastActivity: admin.firestore.FieldValue.serverTimestamp(), running: true}, {merge: true});
+}
+
+async function waitForVmReady(): Promise<void> {
+  const maxWaitMs = 90000;
+  const intervalMs = 5000;
+  const startTime = Date.now();
+  while (Date.now() - startTime < maxWaitMs) {
+    try {
+      const res = await fetch(``, {method: "GET"});
+      if (res.ok || res.status === 404) {
+        logger.info("OpenWA service is ready");
+        return;
+      }
+    } catch (err) {
+      // VM/service not up yet, keep waiting
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error("Timed out waiting for VM/WhatsApp service to become ready");
+}
+
+// Idle-checker: runs every 10 min. Stops the VM if no activity for 15+ min — saves cost
+// since the VM only needs to run right after an invoice is paid or a manual send.
+export const stopIdleVm = onSchedule(
+  {schedule: "*/10 * * * *", secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
+  async () => {
+    const db = admin.firestore();
+    const stateRef = db.collection("system").doc("vmState");
+    const snap = await stateRef.get();
+    const data = snap.data();
+    if (!data?.running) return;
+    const lastActivity = data.lastActivity?.toDate?.() || new Date(0);
+    const idleMinutes = (Date.now() - lastActivity.getTime()) / 60000;
+    if (idleMinutes >= 15) {
+      await azureVmAction("deallocate");
+      await stateRef.set({running: false}, {merge: true});
+      logger.info("VM stopped due to inactivity");
+    }
+  }
+);
+
+
+
+
+
+
+
