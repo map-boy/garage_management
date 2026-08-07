@@ -258,6 +258,26 @@ export const requestWhatsAppPairingCode = onCall(
     return {pairingCode: data.pairingCode || data.code};
   }
 );
+
+export const wakeVm = onCall(
+  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
+  async () => {
+    await ensureVmRunning();
+    await waitForVmReady();
+    return {success: true};
+  }
+);
+
+export const restartWhatsAppSession = onCall(
+  {secrets: [openwaApiKey, openwaUrl]},
+  async (request) => {
+    const {garageId} = request.data;
+    if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
+    const sessionId = await getGarageSessionId(garageId);
+    await ensureSessionActive(sessionId);
+    return {success: true};
+  }
+);
 // ---- Scheduled holiday / bulk messages ----
 // Runs once daily at 08:00 Africa/Kigali time. Using an explicit timeZone
 // (not UTC) means "today" always matches the garage's real local date,
@@ -568,4 +588,5 @@ export const stopIdleVm = onSchedule(
     }
   }
 );
+
 
