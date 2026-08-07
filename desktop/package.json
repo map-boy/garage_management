@@ -1,0 +1,66 @@
+﻿{
+  "name": "garage-management-pro",
+  "version": "1.0.0",
+  "description": "Garage Management Pro - Offline Desktop Suite",
+  "main": "electron/src/main.js",
+  "author": "VAF UBWENGE TECH",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently \"npm run vite\" \"wait-on http://localhost:3000 && electron .\"",
+    "vite": "cd ../garage && npm run dev",
+    "build": "cd ../garage && npm run build && electron-builder",
+    "build:win": "cd ../garage && npm run build && cd ../garage-desktop && electron-builder --win",
+    "dist": "electron-builder --win --publish=never"
+  },
+  "build": {
+    "appId": "com.vafubwengetech.garagemanagementpro",
+    "productName": "Garage Management Pro",
+    "directories": {
+      "output": "releases"
+    },
+    "files": [
+      "electron/**/*",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../garage/dist",
+        "to": "app",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icons/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icons/icon.ico",
+      "uninstallerIcon": "assets/icons/icon.ico",
+      "installerHeaderIcon": "assets/icons/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Garage Management Pro"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "map-boy",
+      "repo": "garage_management"
+    }
+  },
+  "devDependencies": {
+    "concurrently": "^8.0.0",
+    "electron": "^30.5.1",
+    "electron-builder": "^24.0.0",
+    "wait-on": "^7.0.0"
+  },
+  "dependencies": {
+    "@sentry/electron": "^7.15.0",
+    "electron-log": "^5.0.0",
+    "electron-updater": "^6.0.0"
+  }
+}
+

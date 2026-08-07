@@ -10,3 +10,8 @@ coverage/
 whatsapp-qr.png
 functions/log.json
 functions/test.txt
+desktop/node_modules/
+desktop/releases/
+desktop/*.har
+desktop/AI-CHAT.txt
+desktop/update.txt
