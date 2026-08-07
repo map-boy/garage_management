@@ -20,7 +20,7 @@ export function JobCardsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formData, setFormData] = useState({
-    vehicleId: '', technicianName: '', description: '', laborCost: 0
+    vehicleId: '', technicianName: '', description: '', laborCost: 0 as number | ''
   });
 
   const filtered = jobs.filter(j => {
@@ -160,4 +160,5 @@ export function JobCardsPage() {
     </div>
   );
 }
+
 

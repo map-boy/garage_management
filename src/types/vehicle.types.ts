@@ -1,11 +1,12 @@
-export interface Vehicle {
+﻿export interface Vehicle {
   id: string;
   plate: string;
   make: string;
   model: string;
-  year: number;
+  year: number | '';
   color: string;
   clientId: string;
-  mileage: number;
+  mileage: number | '';
   fuelType: 'Petrol' | 'Diesel' | 'Electric' | 'Hybrid';
 }
+
