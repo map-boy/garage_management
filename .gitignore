@@ -15,3 +15,10 @@ desktop/releases/
 desktop/*.har
 desktop/AI-CHAT.txt
 desktop/update.txt
+functions/service-account.json
+functions/qr_output.json
+create_try.json
+extract_qr_logic.sh
+qr_response.json
+session_new.json
+watchdog.sh

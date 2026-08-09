@@ -1,4 +1,4 @@
-﻿import {setGlobalOptions} from "firebase-functions";
+import {setGlobalOptions} from "firebase-functions";
 import {onCall, HttpsError} from "firebase-functions/https";
 import {onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {onSchedule} from "firebase-functions/v2/scheduler";
@@ -23,6 +23,16 @@ const DEFAULT_WHATSAPP_LIMIT = 1000;
 // ---- OpenWA send helpers ----
 function toChatId(phone: string): string {
   return phone.replace(/[^\d]/g, "") + "@c.us";
+}
+
+async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 8000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {...options, signal: controller.signal});
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function sendWhatsAppText(
@@ -184,78 +194,126 @@ export const sendManualWhatsApp = onCall(
 
 // ---- WhatsApp session management (boss dashboard) ----
 export const createWhatsAppSession = onCall(
-  {secrets: [openwaApiKey, openwaUrl]},
+  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
   async (request) => {
     const {garageId} = request.data;
     if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
-    const sessionName = `garage-${garageId}`.slice(0, 50);
-    const res = await fetch(`${openwaUrl.value()}/api/sessions`, {
-      method: "POST",
-      headers: {"X-API-Key": openwaApiKey.value(), "Content-Type": "application/json"},
-      body: JSON.stringify({name: sessionName}),
-    });
-    const data: any = await res.json();
-    if (!res.ok) throw new HttpsError("internal", data.message || "Failed to create session");
-    await admin.firestore().collection("garages").doc(garageId).update({
-      whatsappSessionId: data.id,
-      whatsappSessionStatus: data.status,
-    });
-    await fetch(`${openwaUrl.value()}/api/sessions/${data.id}/start`, {
-      method: "POST",
-      headers: {"X-API-Key": openwaApiKey.value()},
-    });
-    return {sessionId: data.id};
+    try {
+      await ensureVmRunning();
+      await waitForVmReady();
+      const sessionName = `garage-${garageId}`.slice(0, 50);
+      const res = await fetch(`${openwaUrl.value()}/api/sessions`, {
+        method: "POST",
+        headers: {"X-API-Key": openwaApiKey.value(), "Content-Type": "application/json"},
+        body: JSON.stringify({name: sessionName}),
+      });
+      let data: any = await res.json();
+      if (!res.ok) {
+        const alreadyExists = res.status === 409 || /already exists/i.test(data?.message || "");
+        if (alreadyExists) {
+          const listRes = await fetch(`${openwaUrl.value()}/api/sessions`, {
+            headers: {"X-API-Key": openwaApiKey.value()},
+          });
+          const listData: any = await listRes.json();
+          const sessions = Array.isArray(listData) ? listData : listData.sessions || [];
+          const existing = sessions.find((s: any) => s.name === sessionName);
+          if (!existing) throw new HttpsError("internal", "Session name conflict but could not find existing session");
+          data = existing;
+        } else {
+          throw new HttpsError("internal", data.message || "Failed to create session");
+        }
+      }
+      await admin.firestore().collection("garages").doc(garageId).update({
+        whatsappSessionId: data.id,
+        whatsappSessionStatus: data.status,
+      });
+      await fetch(`${openwaUrl.value()}/api/sessions/${data.id}/start`, {
+        method: "POST",
+        headers: {"X-API-Key": openwaApiKey.value()},
+      });
+      return {sessionId: data.id};
+    } catch (error: any) {
+      logger.error("createWhatsAppSession failed", error);
+      throw new HttpsError("internal", error.message || "Failed to create session - VM may still be waking up");
+    }
   }
 );
 
 export const getWhatsAppSessionStatus = onCall(
-  {secrets: [openwaApiKey, openwaUrl]},
+  {secrets: [openwaApiKey, openwaUrl], timeoutSeconds: 15},
   async (request) => {
     const {garageId} = request.data;
     if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
-    const garageSnap = await admin.firestore().collection("garages").doc(garageId).get();
-    const sessionId = garageSnap.data()?.whatsappSessionId;
-    if (!sessionId) return {linked: false};
-    const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}`, {
-      headers: {"X-API-Key": openwaApiKey.value()},
-    });
-    if (!res.ok) return {linked: false};
-    const data: any = await res.json();
-    return {linked: true, status: data.status, phone: data.phone, sessionId};
+    try {
+      const garageSnap = await admin.firestore().collection("garages").doc(garageId).get();
+      const sessionId = garageSnap.data()?.whatsappSessionId;
+      if (!sessionId) return {linked: false};
+      const res = await fetchWithTimeout(`${openwaUrl.value()}/api/sessions/${sessionId}`, {
+        headers: {"X-API-Key": openwaApiKey.value()},
+      }, 6000);
+      if (!res.ok) return {linked: true, status: "unreachable", sessionId};
+      const data: any = await res.json();
+      return {linked: true, status: data.status, phone: data.phone, sessionId};
+    } catch (error: any) {
+      logger.error("getWhatsAppSessionStatus failed", error);
+      return {linked: false, status: "vm_asleep"};
+    }
   }
 );
 
 export const getWhatsAppQr = onCall(
-  {secrets: [openwaApiKey, openwaUrl]},
+  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 120},
   async (request) => {
     const {garageId} = request.data;
     if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
-    const sessionId = await getGarageSessionId(garageId);
-    const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/qr`, {
-      headers: {"X-API-Key": openwaApiKey.value()},
-    });
-    const data: any = await res.json();
-    if (!res.ok) throw new HttpsError("internal", data.message || "QR not ready");
-    return {qrCode: data.qrCode};
+    try {
+      await ensureVmRunning();
+      await waitForVmReady();
+      const sessionId = await getGarageSessionId(garageId);
+      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/start`, {
+        method: "POST",
+        headers: {"X-API-Key": openwaApiKey.value()},
+      }).catch(() => null);
+      const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/qr`, {
+        headers: {"X-API-Key": openwaApiKey.value()},
+      });
+      const data: any = await res.json();
+      if (!res.ok) throw new HttpsError("internal", data.message || "QR not ready");
+      return {qrCode: data.qrCode};
+    } catch (error: any) {
+      logger.error("getWhatsAppQr failed", error);
+      throw new HttpsError("internal", error.message || "Could not get QR - VM may still be waking up");
+    }
   }
 );
 
 export const requestWhatsAppPairingCode = onCall(
-  {secrets: [openwaApiKey, openwaUrl]},
+  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 120},
   async (request) => {
     const {garageId, phoneNumber} = request.data;
     if (!garageId || !phoneNumber) {
       throw new HttpsError("invalid-argument", "garageId and phoneNumber are required");
     }
-    const sessionId = await getGarageSessionId(garageId);
-    const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/pairing-code`, {
-      method: "POST",
-      headers: {"X-API-Key": openwaApiKey.value(), "Content-Type": "application/json"},
-      body: JSON.stringify({phoneNumber: phoneNumber.replace(/[^\d]/g, "")}),
-    });
-    const data: any = await res.json();
-    if (!res.ok) throw new HttpsError("internal", data.message || "Failed to get pairing code");
-    return {pairingCode: data.pairingCode || data.code};
+    try {
+      await ensureVmRunning();
+      await waitForVmReady();
+      const sessionId = await getGarageSessionId(garageId);
+      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/start`, {
+        method: "POST",
+        headers: {"X-API-Key": openwaApiKey.value()},
+      }).catch(() => null);
+      const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/pairing-code`, {
+        method: "POST",
+        headers: {"X-API-Key": openwaApiKey.value(), "Content-Type": "application/json"},
+        body: JSON.stringify({phoneNumber: phoneNumber.replace(/[^\d]/g, "")}),
+      });
+      const data: any = await res.json();
+      if (!res.ok) throw new HttpsError("internal", data.message || "Failed to get pairing code");
+      return {pairingCode: data.pairingCode || data.code};
+    } catch (error: any) {
+      logger.error("requestWhatsAppPairingCode failed", error);
+      throw new HttpsError("internal", error.message || "Could not get pairing code - VM may still be waking up");
+    }
   }
 );
 
@@ -268,6 +326,48 @@ export const wakeVm = onCall(
   }
 );
 
+export const disconnectWhatsAppSession = onCall(
+  {secrets: [openwaApiKey, openwaUrl], timeoutSeconds: 60},
+  async (request) => {
+    const {garageId} = request.data;
+    if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
+    try {
+      const garageSnap = await admin.firestore().collection("garages").doc(garageId).get();
+      const sessionId = garageSnap.data()?.whatsappSessionId;
+      if (!sessionId) return {success: true};
+      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/logout`, {
+        method: "POST",
+        headers: {"X-API-Key": openwaApiKey.value()},
+      }).catch(() => null);
+      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/stop`, {
+        method: "POST",
+        headers: {"X-API-Key": openwaApiKey.value()},
+      }).catch(() => null);
+      await admin.firestore().collection("garages").doc(garageId).update({
+        whatsappSessionId: admin.firestore.FieldValue.delete(),
+        whatsappSessionStatus: admin.firestore.FieldValue.delete(),
+      });
+      return {success: true};
+    } catch (error: any) {
+      logger.error("disconnectWhatsAppSession failed", error);
+      throw new HttpsError("internal", error.message || "Failed to disconnect session");
+    }
+  }
+);
+export const getVmStatus = onCall(
+  {secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
+  async () => {
+    const snap = await admin.firestore().collection("system").doc("vmState").get();
+    const data = snap.data();
+    if (!data?.running) return {running: false, lastActivity: null, idleMinutes: null};
+    const lastActivity = data.lastActivity?.toDate?.() || null;
+    return {
+      running: true,
+      lastActivity: lastActivity ? lastActivity.toISOString() : null,
+      idleMinutes: lastActivity ? (Date.now() - lastActivity.getTime()) / 60000 : null,
+    };
+  }
+);
 export const restartWhatsAppSession = onCall(
   {secrets: [openwaApiKey, openwaUrl], timeoutSeconds: 120},
   async (request) => {
