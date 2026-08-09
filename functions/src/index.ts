@@ -660,7 +660,7 @@ async function ensureSessionActive(sessionId: string): Promise<void> {
     });
     if (res.ok) {
       const data: any = await res.json();
-      if (data.status === "connected" || data.status === "active") {
+      if (data.status === "ready" || data.status === "connected" || data.status === "active") {
         return;
       }
     }
