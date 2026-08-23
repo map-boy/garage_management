@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { GarageSettings } from '../types/settings.types';
 import { Button } from '../components/ui/Button';
 import { Toast, ToastType } from '../components/ui/Toast';
-import { Database, Download, Upload, Trash2, ShieldCheck, Save, Camera, Image as ImageIcon } from 'lucide-react';
+import { Database, Download, Upload, Trash2, ShieldCheck, Save, Camera, Image as ImageIcon, MessageCircle } from 'lucide-react';
 
 export function SettingsPage() {
   const { profile } = useAuth();
@@ -165,6 +165,31 @@ export function SettingsPage() {
                 onChange={(e) => setSettings({ ...settings, taxRate: (parseFloat(e.target.value) || 0) / 100 })}
               />
             </div>
+          </div>
+
+          <div className="pt-4 border-t border-gray-50 space-y-4">
+            <div className="flex items-center gap-2">
+              <MessageCircle className="w-4 h-4 text-gray-400" />
+              <h4 className="text-xs font-black uppercase tracking-wide text-gray-700">WhatsApp Automation</h4>
+            </div>
+            <label className="flex items-start gap-3 p-3 rounded-xl border border-gray-100 cursor-pointer hover:bg-gray-50">
+              <input
+                type="checkbox"
+                className="mt-0.5 w-4 h-4 rounded-sm accent-emerald-600"
+                checked={settings.whatsappNotifyOnIssue ?? false}
+                onChange={(e) => setSettings({ ...settings, whatsappNotifyOnIssue: e.target.checked })}
+              />
+              <span>
+                <span className="block text-sm font-bold text-gray-800">
+                  Send the invoice when the job is done
+                </span>
+                <span className="block text-xs text-gray-500 mt-0.5">
+                  The client gets the invoice PDF on WhatsApp as soon as it is issued.
+                  A paid receipt is always sent when the invoice is marked paid, whether
+                  or not this is on. Each message uses one of your monthly allowance.
+                </span>
+              </span>
+            </label>
           </div>
 
           <div className="pt-4 border-t border-gray-50 space-y-4">

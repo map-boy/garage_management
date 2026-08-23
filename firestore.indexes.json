@@ -1,4 +1,71 @@
 {
-  "indexes": [],
-  "fieldOverrides": []
+  "indexes": [
+    {
+      "collectionGroup": "invoices",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {"fieldPath": "whatsappPaid.state", "order": "ASCENDING"},
+        {"fieldPath": "whatsappPaid.updatedAt", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "invoices",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {"fieldPath": "whatsappIssued.state", "order": "ASCENDING"},
+        {"fieldPath": "whatsappIssued.updatedAt", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "invoices",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "status", "order": "ASCENDING"},
+        {"fieldPath": "issuedAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "invoices",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "clientId", "order": "ASCENDING"},
+        {"fieldPath": "issuedAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "jobs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "status", "order": "ASCENDING"},
+        {"fieldPath": "startedAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "scheduledMessages",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {"fieldPath": "sendDate", "order": "ASCENDING"},
+        {"fieldPath": "status", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "whatsappLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "invoiceId", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "whatsappLogs",
+      "fieldPath": "createdAt",
+      "indexes": [
+        {"queryScope": "COLLECTION", "order": "ASCENDING"},
+        {"queryScope": "COLLECTION", "order": "DESCENDING"},
+        {"queryScope": "COLLECTION_GROUP", "order": "ASCENDING"}
+      ]
+    }
+  ]
 }

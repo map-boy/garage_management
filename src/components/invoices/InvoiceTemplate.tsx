@@ -1,5 +1,5 @@
 ﻿import { Invoice, Client, Vehicle } from '../../types';
-import { formatCurrency, formatDate } from '../../lib/utils';
+import { formatCurrency, formatDate, calculateInvoiceTotals } from '../../lib/utils';
 import { settingsService } from '../../services/settingsService';
 import defaultLogo from '../../assets/logo.png';
 
@@ -11,9 +11,11 @@ interface InvoiceTemplateProps {
 
 export function InvoiceTemplate({ invoice, client, vehicle }: InvoiceTemplateProps) {
   const settings = settingsService.get();
-  const subtotal = invoice.lineItems.reduce((acc, item) => acc + (item.qty * item.unitCost), 0) + invoice.laborCost;
-  const tax = subtotal * invoice.taxRate;
-  const total = subtotal + tax;
+  const { subtotal, tax, total } = calculateInvoiceTotals(
+    invoice.lineItems,
+    invoice.laborCost,
+    invoice.taxRate
+  );
 
   return (
     <div className="bg-white p-8 max-w-4xl mx-auto border border-gray-200 print:border-none print:shadow-none">

@@ -31,6 +31,10 @@
     "indent": ["error", 2],
     "max-len": "off",
     "require-jsdoc": "off",
+    // Comments here explain *why* code is shaped a certain way rather than
+    // restating each parameter, so the tag-completeness check (deprecated in
+    // ESLint itself) only produces noise. Types come from TypeScript.
+    "valid-jsdoc": "off",
     "@typescript-eslint/no-var-requires": "off",
     "new-cap": "off",
     "@typescript-eslint/no-explicit-any": "off",
