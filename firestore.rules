@@ -152,6 +152,16 @@ service cloud.firestore {
                       && resource.data.status != 'in_progress';
       }
 
+      // ---- Archived record chunks ------------------------------------
+      // A month-close snapshot stores its jobs and invoices as chunks one
+      // level deeper than the wildcard below reaches ({docId} matches a
+      // single path segment), so this path needs its own rule or the
+      // archive would be write-denied and unreadable.
+      match /archives/{archiveId}/records/{chunkId} {
+        allow read: if belongsToGarage(garageId);
+        allow write: if belongsToGarage(garageId) && isManagerRole();
+      }
+
       // ---- Everything else under a garage ----------------------------
       // clients, vehicles, jobs, stock, reminders, archives.
       //

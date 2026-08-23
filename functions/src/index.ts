@@ -22,7 +22,6 @@ import {
 import {reserveQuota, releaseQuota} from "./lib/quota";
 import {deliverInvoice} from "./lib/invoiceDelivery";
 import {
-  SESSION_READY_STATES,
   ensureSessionActive,
   getGarageSessionId,
   getSessionStatus,
@@ -334,6 +333,10 @@ export const sendScheduledMessages = onSchedule(
           lastClientId,
           sentCount,
           failedCount,
+          // Recorded so "sent" against a partial client list is explainable
+          // later — the broadcast stopped because the allowance ran out, not
+          // because every client was reached.
+          quotaExhausted: exhaustedQuota,
           ...(finished ?
             {sentAt: admin.firestore.FieldValue.serverTimestamp()} :
             {}),
@@ -541,12 +544,6 @@ export const disconnectWhatsAppSession = onCall(
     return {success: true};
   }
 );
-
-/** Exposed so the dashboard can label states with the same vocabulary. */
-export const getWhatsAppReadyStates = onCall({}, async (request) => {
-  await assertSuperAccess(request);
-  return {states: SESSION_READY_STATES};
-});
 
 // ---------------------------------------------------------------------------
 // VM lifecycle

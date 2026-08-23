@@ -176,6 +176,26 @@ await check("BOSS reads any garage",
 await check("staff reads clients",
   assertSucceeds(getDoc(doc(owner1, "garages/garageA/clients/c1"))));
 
+// Archive record chunks live one level deeper than the collection wildcard
+// reaches, so they need their own rule — without it, closing a month fails.
+await check("manager writes an archive record chunk",
+  assertSucceeds(setDoc(
+    doc(owner1, "garages/garageA/archives/arch1/records/jobs_0000"),
+    {kind: "jobs", index: 0, rows: []})));
+
+await check("staff reads an archive record chunk",
+  assertSucceeds(getDoc(
+    doc(tech1, "garages/garageA/archives/arch1/records/jobs_0000"))));
+
+await check("another garage cannot read archive record chunks",
+  assertFails(getDoc(
+    doc(owner2, "garages/garageA/archives/arch1/records/jobs_0000"))));
+
+await check("technician cannot write an archive record chunk",
+  assertFails(setDoc(
+    doc(tech1, "garages/garageA/archives/arch1/records/jobs_0001"),
+    {kind: "jobs", index: 1, rows: []})));
+
 await testEnv.cleanup();
 
 const failed = results.filter(([s]) => s === "FAIL");
