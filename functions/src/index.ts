@@ -1,691 +1,635 @@
 import {setGlobalOptions} from "firebase-functions";
 import {onCall, HttpsError} from "firebase-functions/https";
-import {onDocumentUpdated} from "firebase-functions/v2/firestore";
+import {
+  onDocumentCreated,
+  onDocumentUpdated,
+} from "firebase-functions/v2/firestore";
 import {onSchedule} from "firebase-functions/v2/scheduler";
-import {defineSecret} from "firebase-functions/params";
 import * as logger from "firebase-functions/logger";
 import * as admin from "firebase-admin";
-import PDFDocument from "pdfkit";
+
+import {
+  AZURE_SECRETS,
+  OPENWA_SECRETS,
+  WHATSAPP_SECRETS,
+} from "./lib/secrets";
+import {
+  assertGarageAccess,
+  assertSuperAccess,
+  requirePhone,
+  requireString,
+} from "./lib/auth";
+import {reserveQuota, releaseQuota} from "./lib/quota";
+import {deliverInvoice} from "./lib/invoiceDelivery";
+import {
+  SESSION_READY_STATES,
+  ensureSessionActive,
+  getGarageSessionId,
+  getSessionStatus,
+  isSessionReady,
+  openwaRequest,
+  openwaTry,
+  recordSessionStatus,
+  sendWhatsAppText,
+} from "./lib/openwa";
+import {
+  ensureVmReady,
+  readVmState,
+  stopVm,
+  touchVmActivity,
+} from "./lib/vm";
+import {sleep} from "./lib/http";
 
 if (!admin.apps.length) {
   admin.initializeApp();
 }
-setGlobalOptions({maxInstances: 10});
 
-const openwaApiKey = defineSecret("OPENWA_API_KEY");
-const openwaUrl = defineSecret("OPENWA_URL");
-const azureAppId = defineSecret("AZURE_APP_ID");
-const azurePassword = defineSecret("AZURE_PASSWORD");
-const azureTenant = defineSecret("AZURE_TENANT");
-const azureSubscriptionId = defineSecret("AZURE_SUBSCRIPTION_ID");
-const DEFAULT_WHATSAPP_LIMIT = 1000;
+/**
+ * maxInstances caps spend if something goes wrong (a retry storm, a runaway
+ * client). The WhatsApp path is serialised by a single VM anyway, so a
+ * higher ceiling would not increase real throughput.
+ */
+setGlobalOptions({maxInstances: 10, region: "us-central1"});
 
-// ---- OpenWA send helpers ----
-function toChatId(phone: string): string {
-  return phone.replace(/[^\d]/g, "") + "@c.us";
-}
+// ---------------------------------------------------------------------------
+// Invoice automation
+// ---------------------------------------------------------------------------
 
-async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 8000): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {...options, signal: controller.signal});
-  } finally {
-    clearTimeout(timer);
-  }
-}
+/**
+ * Sends the invoice as soon as it is issued (i.e. the job is done).
+ * Opt-in per garage via `whatsappNotifyOnIssue` so a garage that only wants
+ * payment receipts is not forced into two messages per job.
+ */
+export const onInvoiceIssued = onDocumentCreated(
+  {
+    document: "garages/{garageId}/invoices/{invoiceId}",
+    secrets: WHATSAPP_SECRETS,
+    timeoutSeconds: 300,
+    retry: false,
+  },
+  async (event) => {
+    const invoice = event.data?.data();
+    if (!invoice) return;
 
-async function sendWhatsAppText(
-  apiKey: string,
-  sessionId: string,
-  toPhone: string,
-  message: string
-): Promise<void> {
-  const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/messages/send-text`, {
-    method: "POST",
-    headers: {"X-API-Key": apiKey, "Content-Type": "application/json"},
-    body: JSON.stringify({chatId: toChatId(toPhone), text: message}),
-  });
-  if (!res.ok) {
-    throw new Error(`OpenWA send failed: ${await res.text()}`);
-  }
-}
+    const {garageId, invoiceId} = event.params;
+    const garage = (await admin.firestore()
+      .collection("garages").doc(garageId).get()).data();
 
-// ---- Quota check + increment (per garage) ----
-async function checkAndIncrementQuota(garageId: string): Promise<boolean> {
-  const garageRef = admin.firestore().collection("garages").doc(garageId);
-  return admin.firestore().runTransaction(async (tx) => {
-    const snap = await tx.get(garageRef);
-    const data = snap.data() || {};
-    const used = data.whatsappMessagesUsed || 0;
-    const limit = data.whatsappMessagesLimit ?? DEFAULT_WHATSAPP_LIMIT;
-    if (used >= limit) {
-      return false;
+    if (garage?.whatsappNotifyOnIssue !== true) {
+      logger.debug("Issue notification disabled for garage", {garageId});
+      return;
     }
-    tx.update(garageRef, {whatsappMessagesUsed: used + 1});
-    return true;
-  });
-}
+    // An invoice created already marked Paid is handled as a paid receipt
+    // only, so the customer does not get two messages a second apart.
+    if (invoice.status === "Paid") {
+      await deliverInvoice(garageId, invoiceId, "paid");
+      return;
+    }
+    await deliverInvoice(garageId, invoiceId, "issued");
+  }
+);
 
-// ---- Auto-send WhatsApp when invoice is marked Paid ----
+/**
+ * Sends the paid receipt when an invoice transitions to Paid.
+ * The transition guard (before !== Paid, after === Paid) plus the claim in
+ * deliverInvoice means edits to an already-paid invoice never re-send.
+ */
 export const onInvoicePaid = onDocumentUpdated(
-  {document: "garages/{garageId}/invoices/{invoiceId}", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
+  {
+    document: "garages/{garageId}/invoices/{invoiceId}",
+    secrets: WHATSAPP_SECRETS,
+    timeoutSeconds: 300,
+    retry: false,
+  },
   async (event) => {
     const before = event.data?.before.data();
     const after = event.data?.after.data();
     if (!before || !after) return;
     if (before.status === "Paid" || after.status !== "Paid") return;
 
-    const {garageId} = event.params;
-    const clientId = after.clientId;
-    if (!clientId) return;
+    const {garageId, invoiceId} = event.params;
+    await deliverInvoice(garageId, invoiceId, "paid");
+  }
+);
 
-    const clientSnap = await admin.firestore()
-      .collection("garages").doc(garageId)
-      .collection("clients").doc(clientId).get();
-    const client = clientSnap.data();
-    if (!client?.phone) {
-      logger.warn("No client phone for paid invoice", {garageId, invoiceId: event.params.invoiceId});
-      return;
+/**
+ * Manual send / resend, driven by the button on the invoice screen.
+ * `force` lets an operator re-send a message that already succeeded (for
+ * example after the customer changed number); everything else is guarded by
+ * the same claim as the automatic path.
+ */
+export const sendInvoiceWhatsApp = onCall(
+  {secrets: WHATSAPP_SECRETS, timeoutSeconds: 300},
+  async (request) => {
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId);
+    const invoiceId = requireString(request.data?.invoiceId, "invoiceId", 128);
+    const kind = request.data?.kind === "paid" ? "paid" : "issued";
+    const force = request.data?.force === true;
+
+    const result = await deliverInvoice(garageId, invoiceId, kind, {force});
+    if (!result.delivered) {
+      throw new HttpsError(
+        "failed-precondition",
+        result.reason || "WhatsApp delivery failed"
+      );
     }
+    return {success: true, to: result.to};
+  }
+);
 
-    const garageSnap = await admin.firestore().collection("garages").doc(garageId).get();
-    const garage = garageSnap.data();
-    const garageName = garage?.garageName || "Your Garage";
+/**
+ * Sweeps up deliveries that failed for transient reasons (VM asleep, session
+ * restarting, network blip). Runs hourly during business hours so a paid
+ * invoice always reaches the customer eventually, without an operator having
+ * to notice and press Resend.
+ */
+export const retryFailedInvoiceMessages = onSchedule(
+  {
+    schedule: "15 8-19 * * *",
+    timeZone: "Africa/Kigali",
+    secrets: WHATSAPP_SECRETS,
+    timeoutSeconds: 540,
+  },
+  async () => {
+    const db = admin.firestore();
+    const cutoff = admin.firestore.Timestamp.fromMillis(
+      Date.now() - 24 * 60 * 60 * 1000
+    );
+    const MAX_ATTEMPTS = 5;
+    const MAX_PER_RUN = 25;
 
-    await ensureVmRunning();
-    await waitForVmReady();
-    const allowed = await checkAndIncrementQuota(garageId);
-    if (!allowed) {
-      logger.warn("WhatsApp quota exhausted", {garageId});
-      return;
-    }
+    for (const kind of ["paid", "issued"] as const) {
+      const field = kind === "paid" ? "whatsappPaid" : "whatsappIssued";
+      const snap = await db.collectionGroup("invoices")
+        .where(`${field}.state`, "==", "failed")
+        .where(`${field}.updatedAt`, ">=", cutoff)
+        .orderBy(`${field}.updatedAt`, "asc")
+        .limit(MAX_PER_RUN)
+        .get();
 
-    const subtotal = (after.lineItems || []).reduce(
-      (acc: number, item: any) => acc + item.qty * item.unitCost, 0
-    ) + (after.laborCost || 0);
-    const taxRate = after.taxRate || 0;
-    const total = subtotal + subtotal * taxRate;
+      for (const doc of snap.docs) {
+        const record = doc.data()?.[field] || {};
+        // Give up after a few tries: past that the cause is structural
+        // (no session linked, bad number) and retrying just burns the VM.
+        if (Number(record.attempts || 0) >= MAX_ATTEMPTS) continue;
 
-    let vehiclePlate = "";
-    let vehicleMakeModel = "";
-    let vehicleYear: number | undefined = undefined;
-    if (after.jobId) {
-      const jobSnap = await admin.firestore()
-        .collection("garages").doc(garageId)
-        .collection("jobs").doc(after.jobId).get();
-      const job = jobSnap.data();
-      if (job?.vehicleId) {
-        const vehicleSnap = await admin.firestore()
-          .collection("garages").doc(garageId)
-          .collection("vehicles").doc(job.vehicleId).get();
-        const vehicle = vehicleSnap.data();
-        if (vehicle) {
-          vehiclePlate = vehicle.plate || "";
-          vehicleMakeModel = `${vehicle.make || ""} ${vehicle.model || ""}`.trim();
-          vehicleYear = vehicle.year;
-        }
+        const garageId = doc.ref.parent.parent?.id;
+        if (!garageId) continue;
+        await deliverInvoice(garageId, doc.id, kind);
       }
-    }
-
-
-    try {
-      const pdfBuffer = await generateInvoicePdf(
-        garageName,
-        client.name || "",
-        client.email || "",
-        after.id || event.params.invoiceId,
-        vehiclePlate,
-        vehicleMakeModel,
-        vehicleYear,
-        after.lineItems || [],
-        after.laborCost || 0,
-        taxRate,
-        garage?.currency || "RWF"
-      );
-      const pdfUrl = await uploadInvoicePdfAndGetUrl(
-        pdfBuffer,
-        garageId,
-        event.params.invoiceId
-      );
-      const sessionId = await getGarageSessionId(garageId);
-      await ensureSessionActive(sessionId);
-      await sendWhatsAppTemplate(
-        openwaApiKey.value(),
-        sessionId,
-        formatPhone(client.phone),
-        client.name || "",
-        after.id || event.params.invoiceId,
-        `${total.toLocaleString()} ${garage?.currency || "RWF"}`,
-        pdfUrl
-      );
-      logger.info("WhatsApp paid notification sent", {garageId, clientId});
-    } catch (error: any) {
-      logger.error("WhatsApp send failed", error);
     }
   }
 );
 
-// ---- Manual admin send (boss dashboard) ----
+// ---------------------------------------------------------------------------
+// Manual messaging
+// ---------------------------------------------------------------------------
+
 export const sendManualWhatsApp = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
+  {secrets: WHATSAPP_SECRETS, timeoutSeconds: 180},
   async (request) => {
-    const {garageId, phoneNumber, message} = request.data;
-    if (!garageId || !phoneNumber || !message) {
-      throw new HttpsError("invalid-argument", "garageId, phoneNumber and message are required");
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId);
+    const phoneNumber = requirePhone(request.data?.phoneNumber);
+    const message = requireString(request.data?.message, "message", 4096);
+
+    await ensureVmReady();
+
+    const reservation = await reserveQuota(garageId);
+    if (!reservation.granted) {
+      throw new HttpsError(
+        "resource-exhausted",
+        `Message quota exhausted (${reservation.used}/${reservation.limit} ` +
+        "used this month)."
+      );
     }
-    await ensureVmRunning();
-    await waitForVmReady();
-    const allowed = await checkAndIncrementQuota(garageId);
-    if (!allowed) {
-      throw new HttpsError("resource-exhausted", "WhatsApp message quota exhausted for this garage");
-    }
+
     try {
       const sessionId = await getGarageSessionId(garageId);
-      await ensureSessionActive(sessionId);
-      await sendWhatsAppText(openwaApiKey.value(), sessionId, formatPhone(phoneNumber), message);
+      await ensureSessionActive(garageId, sessionId);
+      await sendWhatsAppText(sessionId, phoneNumber, message);
+      await touchVmActivity();
+      await admin.firestore()
+        .collection("garages").doc(garageId)
+        .collection("whatsappLogs").add({
+          kind: "manual",
+          outcome: "sent",
+          to: phoneNumber,
+          sentBy: request.auth?.uid,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
       return {success: true};
     } catch (error: any) {
-      logger.error("Manual WhatsApp send failed", error);
-      throw new HttpsError("internal", error.message || "WhatsApp send failed");
+      await releaseQuota(garageId, reservation.period);
+      logger.error("Manual WhatsApp send failed", {
+        garageId, error: error?.message,
+      });
+      throw new HttpsError(
+        "internal",
+        error?.message || "WhatsApp send failed"
+      );
     }
   }
 );
 
-// ---- WhatsApp session management (boss dashboard) ----
+/**
+ * Daily broadcast of scheduled (holiday) messages.
+ *
+ * Paced deliberately: WhatsApp bans numbers that fire hundreds of messages
+ * back to back, and a ban costs the garage its only channel. Progress is
+ * checkpointed on the scheduled-message document so a function timeout
+ * resumes where it left off instead of re-messaging everyone.
+ */
+export const sendScheduledMessages = onSchedule(
+  {
+    schedule: "0 8 * * *",
+    timeZone: "Africa/Kigali",
+    secrets: WHATSAPP_SECRETS,
+    timeoutSeconds: 540,
+  },
+  async () => {
+    const PER_MESSAGE_DELAY_MS = 2500;
+    const TIME_BUDGET_MS = 480000; // leave headroom before the 540s timeout
+    const startedAt = Date.now();
+
+    const todayStr = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Africa/Kigali",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(new Date());
+
+    const dueSnap = await admin.firestore()
+      .collectionGroup("scheduledMessages")
+      .where("sendDate", "==", todayStr)
+      .where("status", "in", ["pending", "in_progress"])
+      .get();
+
+    for (const doc of dueSnap.docs) {
+      const data = doc.data();
+      const garageId = doc.ref.parent.parent?.id;
+      if (!garageId) continue;
+
+      try {
+        await doc.ref.update({status: "in_progress"});
+        await ensureVmReady();
+        const sessionId = await getGarageSessionId(garageId);
+        await ensureSessionActive(garageId, sessionId);
+
+        // Resume from the last client processed on a previous run.
+        const cursor = data.lastClientId || null;
+        let query = admin.firestore()
+          .collection("garages").doc(garageId)
+          .collection("clients")
+          .orderBy(admin.firestore.FieldPath.documentId());
+        if (cursor) query = query.startAfter(cursor);
+
+        const clientsSnap = await query.get();
+        let sentCount = Number(data.sentCount || 0);
+        let failedCount = Number(data.failedCount || 0);
+        let lastClientId = cursor;
+        let exhaustedQuota = false;
+
+        for (const clientDoc of clientsSnap.docs) {
+          if (Date.now() - startedAt > TIME_BUDGET_MS) {
+            logger.info("Broadcast paused on time budget; resumes next run", {
+              garageId, scheduledId: doc.id, sentCount,
+            });
+            break;
+          }
+          lastClientId = clientDoc.id;
+          const client = clientDoc.data();
+          if (!client.phone) continue;
+
+          const reservation = await reserveQuota(garageId);
+          if (!reservation.granted) {
+            logger.warn("Quota exhausted mid-broadcast", {
+              garageId, scheduledId: doc.id,
+            });
+            exhaustedQuota = true;
+            break;
+          }
+          try {
+            await sendWhatsAppText(
+              sessionId,
+              `+${String(client.phone).replace(/[^\d]/g, "")}`,
+              data.message
+            );
+            sentCount++;
+          } catch (err: any) {
+            await releaseQuota(garageId, reservation.period);
+            failedCount++;
+            logger.error("Scheduled message failed for client", {
+              garageId, clientId: clientDoc.id, error: err?.message,
+            });
+          }
+          await sleep(PER_MESSAGE_DELAY_MS);
+        }
+
+        const finished = exhaustedQuota ||
+          lastClientId === clientsSnap.docs[clientsSnap.docs.length - 1]?.id ||
+          clientsSnap.empty;
+
+        await doc.ref.update({
+          status: finished ? "sent" : "in_progress",
+          lastClientId,
+          sentCount,
+          failedCount,
+          ...(finished ?
+            {sentAt: admin.firestore.FieldValue.serverTimestamp()} :
+            {}),
+        });
+        await touchVmActivity();
+        logger.info("Scheduled broadcast progress", {
+          garageId, scheduledId: doc.id, sentCount, failedCount, finished,
+        });
+      } catch (error: any) {
+        await doc.ref.update({
+          status: "pending",
+          lastError: error?.message || String(error),
+        }).catch(() => null);
+        logger.error("Scheduled message batch failed", {
+          garageId, scheduledId: doc.id, error: error?.message,
+        });
+      }
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// WhatsApp session management
+// ---------------------------------------------------------------------------
+
 export const createWhatsAppSession = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
+  {secrets: WHATSAPP_SECRETS, timeoutSeconds: 180},
   async (request) => {
-    const {garageId} = request.data;
-    if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId);
+
     try {
-      await ensureVmRunning();
-      await waitForVmReady();
+      await ensureVmReady();
       const sessionName = `garage-${garageId}`.slice(0, 50);
-      const res = await fetch(`${openwaUrl.value()}/api/sessions`, {
-        method: "POST",
-        headers: {"X-API-Key": openwaApiKey.value(), "Content-Type": "application/json"},
-        body: JSON.stringify({name: sessionName}),
-      });
-      let data: any = await res.json();
-      if (!res.ok) {
-        const alreadyExists = res.status === 409 || /already exists/i.test(data?.message || "");
-        if (alreadyExists) {
-          const listRes = await fetch(`${openwaUrl.value()}/api/sessions`, {
-            headers: {"X-API-Key": openwaApiKey.value()},
-          });
-          const listData: any = await listRes.json();
-          const sessions = Array.isArray(listData) ? listData : listData.sessions || [];
-          const existing = sessions.find((s: any) => s.name === sessionName);
-          if (!existing) throw new HttpsError("internal", "Session name conflict but could not find existing session");
-          data = existing;
-        } else {
-          throw new HttpsError("internal", data.message || "Failed to create session");
+
+      let session: any;
+      try {
+        session = await openwaRequest("/api/sessions", {
+          method: "POST",
+          body: {name: sessionName},
+          attempts: 2,
+        });
+      } catch (error: any) {
+        // A name collision means the session already exists — adopt it
+        // rather than failing, so a retried link attempt is not a dead end.
+        if (error?.status !== 409) throw error;
+        const listData = await openwaRequest("/api/sessions");
+        const sessions = Array.isArray(listData) ?
+          listData :
+          listData?.sessions || [];
+        session = sessions.find((s: any) => s.name === sessionName);
+        if (!session) {
+          throw new Error(
+            "A session with this name exists but could not be located."
+          );
         }
       }
-      await admin.firestore().collection("garages").doc(garageId).update({
-        whatsappSessionId: data.id,
-        whatsappSessionStatus: data.status,
-      });
-      await fetch(`${openwaUrl.value()}/api/sessions/${data.id}/start`, {
-        method: "POST",
-        headers: {"X-API-Key": openwaApiKey.value()},
-      });
-      return {sessionId: data.id};
+
+      await admin.firestore().collection("garages").doc(garageId).set({
+        whatsappSessionId: session.id,
+        whatsappSessionStatus: session.status || "starting",
+      }, {merge: true});
+
+      await openwaTry(`/api/sessions/${session.id}/start`, {method: "POST"});
+      return {sessionId: session.id};
     } catch (error: any) {
-      logger.error("createWhatsAppSession failed", error);
-      throw new HttpsError("internal", error.message || "Failed to create session - VM may still be waking up");
+      logger.error("createWhatsAppSession failed", {
+        garageId, error: error?.message,
+      });
+      throw new HttpsError(
+        "internal",
+        error?.message || "Could not create the WhatsApp session."
+      );
     }
   }
 );
 
 export const getWhatsAppSessionStatus = onCall(
-  {secrets: [openwaApiKey, openwaUrl], timeoutSeconds: 15},
+  {secrets: OPENWA_SECRETS, timeoutSeconds: 20},
   async (request) => {
-    const {garageId} = request.data;
-    if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId);
+
+    const garageSnap = await admin.firestore()
+      .collection("garages").doc(garageId).get();
+    const garage = garageSnap.data();
+    const sessionId = garage?.whatsappSessionId;
+    if (!sessionId) return {linked: false, ready: false};
+
     try {
-      const garageSnap = await admin.firestore().collection("garages").doc(garageId).get();
-      const sessionId = garageSnap.data()?.whatsappSessionId;
-      if (!sessionId) return {linked: false};
-      const res = await fetchWithTimeout(`${openwaUrl.value()}/api/sessions/${sessionId}`, {
-        headers: {"X-API-Key": openwaApiKey.value()},
-      }, 6000);
-      if (!res.ok) return {linked: true, status: "unreachable", sessionId};
-      const data: any = await res.json();
-      return {linked: true, status: data.status, phone: data.phone, sessionId};
+      const data = await getSessionStatus(sessionId);
+      const status = String(data?.status ?? "unknown");
+      await recordSessionStatus(garageId, status, data?.phone);
+      return {
+        linked: true,
+        ready: isSessionReady(status),
+        status,
+        phone: data?.phone,
+        sessionId,
+      };
     } catch (error: any) {
-      logger.error("getWhatsAppSessionStatus failed", error);
-      return {linked: false, status: "vm_asleep"};
+      // The VM being asleep is normal, not an error worth alarming on: fall
+      // back to the last status we recorded so the UI still shows something.
+      logger.debug("Session status unreachable", {
+        garageId, error: error?.message,
+      });
+      return {
+        linked: true,
+        ready: false,
+        status: "unreachable",
+        lastKnownStatus: garage?.whatsappSessionStatus ?? null,
+        sessionId,
+      };
     }
   }
 );
 
 export const getWhatsAppQr = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 120},
+  {secrets: WHATSAPP_SECRETS, timeoutSeconds: 180},
   async (request) => {
-    const {garageId} = request.data;
-    if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId);
     try {
-      await ensureVmRunning();
-      await waitForVmReady();
+      await ensureVmReady();
       const sessionId = await getGarageSessionId(garageId);
-      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/start`, {
-        method: "POST",
-        headers: {"X-API-Key": openwaApiKey.value()},
-      }).catch(() => null);
-      const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/qr`, {
-        headers: {"X-API-Key": openwaApiKey.value()},
+      await openwaTry(`/api/sessions/${sessionId}/start`, {method: "POST"});
+      const data = await openwaRequest(`/api/sessions/${sessionId}/qr`, {
+        attempts: 2,
       });
-      const data: any = await res.json();
-      if (!res.ok) throw new HttpsError("internal", data.message || "QR not ready");
       return {qrCode: data.qrCode};
     } catch (error: any) {
-      logger.error("getWhatsAppQr failed", error);
-      throw new HttpsError("internal", error.message || "Could not get QR - VM may still be waking up");
+      logger.error("getWhatsAppQr failed", {garageId, error: error?.message});
+      throw new HttpsError(
+        "internal",
+        error?.message || "The QR code is not ready yet — try again shortly."
+      );
     }
   }
 );
 
 export const requestWhatsAppPairingCode = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 120},
+  {secrets: WHATSAPP_SECRETS, timeoutSeconds: 180},
   async (request) => {
-    const {garageId, phoneNumber} = request.data;
-    if (!garageId || !phoneNumber) {
-      throw new HttpsError("invalid-argument", "garageId and phoneNumber are required");
-    }
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId);
+    const phoneNumber = requirePhone(request.data?.phoneNumber);
     try {
-      await ensureVmRunning();
-      await waitForVmReady();
+      await ensureVmReady();
       const sessionId = await getGarageSessionId(garageId);
-      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/start`, {
-        method: "POST",
-        headers: {"X-API-Key": openwaApiKey.value()},
-      }).catch(() => null);
-      const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/pairing-code`, {
-        method: "POST",
-        headers: {"X-API-Key": openwaApiKey.value(), "Content-Type": "application/json"},
-        body: JSON.stringify({phoneNumber: phoneNumber.replace(/[^\d]/g, "")}),
-      });
-      const data: any = await res.json();
-      if (!res.ok) throw new HttpsError("internal", data.message || "Failed to get pairing code");
+      await openwaTry(`/api/sessions/${sessionId}/start`, {method: "POST"});
+      const data = await openwaRequest(
+        `/api/sessions/${sessionId}/pairing-code`,
+        {
+          method: "POST",
+          body: {phoneNumber: phoneNumber.replace(/[^\d]/g, "")},
+          attempts: 2,
+        }
+      );
       return {pairingCode: data.pairingCode || data.code};
     } catch (error: any) {
-      logger.error("requestWhatsAppPairingCode failed", error);
-      throw new HttpsError("internal", error.message || "Could not get pairing code - VM may still be waking up");
+      logger.error("requestWhatsAppPairingCode failed", {
+        garageId, error: error?.message,
+      });
+      throw new HttpsError(
+        "internal",
+        error?.message || "Could not get a pairing code."
+      );
     }
   }
 );
 
-export const wakeVm = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
-  async () => {
-    await ensureVmRunning();
-    await waitForVmReady();
+export const restartWhatsAppSession = onCall(
+  {secrets: WHATSAPP_SECRETS, timeoutSeconds: 180},
+  async (request) => {
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId);
+    await ensureVmReady();
+    const sessionId = await getGarageSessionId(garageId);
+    await ensureSessionActive(garageId, sessionId);
     return {success: true};
   }
 );
 
 export const disconnectWhatsAppSession = onCall(
-  {secrets: [openwaApiKey, openwaUrl], timeoutSeconds: 60},
+  {secrets: OPENWA_SECRETS, timeoutSeconds: 60},
   async (request) => {
-    const {garageId} = request.data;
-    if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
-    try {
-      const garageSnap = await admin.firestore().collection("garages").doc(garageId).get();
-      const sessionId = garageSnap.data()?.whatsappSessionId;
-      if (!sessionId) return {success: true};
-      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/logout`, {
-        method: "POST",
-        headers: {"X-API-Key": openwaApiKey.value()},
-      }).catch(() => null);
-      await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/stop`, {
-        method: "POST",
-        headers: {"X-API-Key": openwaApiKey.value()},
-      }).catch(() => null);
-      await admin.firestore().collection("garages").doc(garageId).update({
-        whatsappSessionId: admin.firestore.FieldValue.delete(),
-        whatsappSessionStatus: admin.firestore.FieldValue.delete(),
-      });
-      return {success: true};
-    } catch (error: any) {
-      logger.error("disconnectWhatsAppSession failed", error);
-      throw new HttpsError("internal", error.message || "Failed to disconnect session");
-    }
-  }
-);
-export const getVmStatus = onCall(
-  {secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
-  async () => {
-    const snap = await admin.firestore().collection("system").doc("vmState").get();
-    const data = snap.data();
-    if (!data?.running) return {running: false, lastActivity: null, idleMinutes: null};
-    const lastActivity = data.lastActivity?.toDate?.() || null;
-    return {
-      running: true,
-      lastActivity: lastActivity ? lastActivity.toISOString() : null,
-      idleMinutes: lastActivity ? (Date.now() - lastActivity.getTime()) / 60000 : null,
-    };
-  }
-);
-export const restartWhatsAppSession = onCall(
-  {secrets: [openwaApiKey, openwaUrl], timeoutSeconds: 120},
-  async (request) => {
-    const {garageId} = request.data;
-    if (!garageId) throw new HttpsError("invalid-argument", "garageId is required");
-    const sessionId = await getGarageSessionId(garageId);
-    await ensureSessionActive(sessionId);
+    const garageId = requireString(request.data?.garageId, "garageId", 128);
+    await assertGarageAccess(request, garageId, ["owner", "manager", "BOSS"]);
+
+    const garageRef = admin.firestore().collection("garages").doc(garageId);
+    const sessionId = (await garageRef.get()).data()?.whatsappSessionId;
+    if (!sessionId) return {success: true};
+
+    await openwaTry(`/api/sessions/${sessionId}/logout`, {method: "POST"});
+    await openwaTry(`/api/sessions/${sessionId}/stop`, {method: "POST"});
+
+    await garageRef.update({
+      whatsappSessionId: admin.firestore.FieldValue.delete(),
+      whatsappSessionStatus: admin.firestore.FieldValue.delete(),
+      whatsappSessionPhone: admin.firestore.FieldValue.delete(),
+    });
+    logger.info("WhatsApp session disconnected", {
+      garageId, by: request.auth?.uid,
+    });
     return {success: true};
   }
 );
-// ---- Scheduled holiday / bulk messages ----
-// Runs once daily at 08:00 Africa/Kigali time. Using an explicit timeZone
-// (not UTC) means "today" always matches the garage's real local date,
-// so a message scheduled for a specific day never fires a day early/late.
-export const sendScheduledMessages = onSchedule(
-  {schedule: "0 8 * * *", timeZone: "Africa/Kigali", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 300},
-  async () => {
-    const todayStr = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Africa/Kigali",
-      year: "numeric", month: "2-digit", day: "2-digit",
-    }).format(new Date()); // "YYYY-MM-DD"
 
-    const dueSnap = await admin.firestore()
-      .collectionGroup("scheduledMessages")
-      .where("sendDate", "==", todayStr)
+/** Exposed so the dashboard can label states with the same vocabulary. */
+export const getWhatsAppReadyStates = onCall({}, async (request) => {
+  await assertSuperAccess(request);
+  return {states: SESSION_READY_STATES};
+});
+
+// ---------------------------------------------------------------------------
+// VM lifecycle
+// ---------------------------------------------------------------------------
+
+export const wakeVm = onCall(
+  {secrets: WHATSAPP_SECRETS, timeoutSeconds: 180},
+  async (request) => {
+    await assertSuperAccess(request);
+    await ensureVmReady();
+    return {success: true};
+  }
+);
+
+export const getVmStatus = onCall({}, async (request) => {
+  await assertSuperAccess(request);
+  const state = await readVmState();
+  return {
+    running: state.running,
+    lastActivity: state.lastActivity ?
+      state.lastActivity.toISOString() :
+      null,
+    idleMinutes: state.idleMinutes,
+  };
+});
+
+/** Hard stop after business hours — a deallocated VM is what stops billing. */
+export const stopGarageVm = onSchedule(
+  {
+    schedule: "0 20 * * *",
+    timeZone: "Africa/Kigali",
+    secrets: AZURE_SECRETS,
+    timeoutSeconds: 120,
+  },
+  async () => {
+    await stopVm("after business hours");
+  }
+);
+
+/** Idle reaper — the VM only needs to be up around an actual send. */
+export const stopIdleVm = onSchedule(
+  {
+    schedule: "*/10 * * * *",
+    secrets: AZURE_SECRETS,
+    timeoutSeconds: 120,
+  },
+  async () => {
+    const state = await readVmState();
+    if (!state.running) return;
+    if (state.idleMinutes !== null && state.idleMinutes >= 15) {
+      await stopVm(`idle for ${Math.round(state.idleMinutes)} minutes`);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Housekeeping
+// ---------------------------------------------------------------------------
+
+/**
+ * Trims the audit trail so it cannot grow without bound. Ninety days is long
+ * enough to settle a billing dispute and short enough that a busy garage's
+ * log never becomes a cost of its own.
+ */
+export const pruneWhatsAppLogs = onSchedule(
+  {schedule: "30 3 * * 0", timeZone: "Africa/Kigali", timeoutSeconds: 540},
+  async () => {
+    const cutoff = admin.firestore.Timestamp.fromMillis(
+      Date.now() - 90 * 24 * 60 * 60 * 1000
+    );
+    const snap = await admin.firestore()
+      .collectionGroup("whatsappLogs")
+      .where("createdAt", "<", cutoff)
+      .limit(2000)
       .get();
 
-    for (const doc of dueSnap.docs) {
-      const data = doc.data();
-      if (data.status !== "pending") continue;
-
-      const garageId = doc.ref.parent.parent?.id;
-      if (!garageId) continue;
-
-      try {
-        await ensureVmRunning();
-        await waitForVmReady();
-        const sessionId = await getGarageSessionId(garageId);
-        await ensureSessionActive(sessionId);
-        const clientsSnap = await admin.firestore()
-          .collection("garages").doc(garageId)
-          .collection("clients").get();
-
-        let sentCount = 0;
-        for (const clientDoc of clientsSnap.docs) {
-          const client = clientDoc.data();
-          if (!client.phone) continue;
-
-          const allowed = await checkAndIncrementQuota(garageId);
-          if (!allowed) {
-            logger.warn("Quota exhausted mid-broadcast", {garageId, scheduledId: doc.id});
-            break;
-          }
-          try {
-            await sendWhatsAppText(openwaApiKey.value(), sessionId, formatPhone(client.phone), data.message);
-            sentCount++;
-          } catch (err) {
-            logger.error("Scheduled message send failed for client", {garageId, clientId: clientDoc.id, err});
-          }
-        }
-
-        await doc.ref.update({
-          status: "sent",
-          sentAt: admin.firestore.FieldValue.serverTimestamp(),
-          sentCount,
-        });
-        logger.info("Scheduled message broadcast complete", {garageId, scheduledId: doc.id, sentCount});
-      } catch (error: any) {
-        logger.error("Scheduled message batch failed", {garageId, scheduledId: doc.id, error});
-      }
+    if (snap.empty) return;
+    // Batches are hard-capped at 500 writes.
+    for (let i = 0; i < snap.docs.length; i += 400) {
+      const batch = admin.firestore().batch();
+      snap.docs.slice(i, i + 400).forEach((doc) => batch.delete(doc.ref));
+      await batch.commit();
     }
+    logger.info("Pruned WhatsApp logs", {deleted: snap.size});
   }
 );
-
-function formatPhone(phone: string): string {
-  const digits = phone.replace(/[^\d+]/g, "");
-  return digits.startsWith("+") ? digits : `+${digits}`;
-}
-
-
-async function getGarageSessionId(garageId: string): Promise<string> {
-  const snap = await admin.firestore().collection("garages").doc(garageId).get();
-  const sessionId = snap.data()?.whatsappSessionId;
-  if (!sessionId) {
-    throw new Error("No WhatsApp session linked for this garage. Link one in the admin panel first.");
-  }
-  return sessionId;
-}
-async function generateInvoicePdf(
-  garageName: string,
-  clientName: string,
-  clientEmail: string,
-  invoiceNumber: string,
-  vehiclePlate: string,
-  vehicleMakeModel: string,
-  vehicleYear: number | undefined,
-  lineItems: any[],
-  laborCost: number,
-  taxRate: number,
-  currency: string
-): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({margin: 50});
-    const chunks: Buffer[] = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
-
-    const subtotal = (lineItems || []).reduce(
-      (acc, item) => acc + (item.qty || 0) * (item.unitCost || 0), 0
-    ) + (laborCost || 0);
-    const tax = subtotal * (taxRate || 0);
-    const total = subtotal + tax;
-
-    doc.fontSize(20).text(garageName, {align: "center"});
-    doc.moveDown();
-    doc.fontSize(14).text(`Invoice #${invoiceNumber}`, {align: "center"});
-    doc.fontSize(10).fillColor("green").text("PAID", {align: "center"});
-    doc.fillColor("black");
-    doc.moveDown();
-
-    doc.fontSize(12).text(`Bill to: ${clientName}`);
-    if (clientEmail) {
-      doc.fontSize(10).fillColor("gray").text(clientEmail);
-      doc.fillColor("black");
-    }
-    doc.moveDown();
-
-    if (vehiclePlate || vehicleMakeModel) {
-      doc.fontSize(11).text("Vehicle:", {underline: true});
-      doc.fontSize(10).text(`Registration: ${vehiclePlate || "N/A"}`);
-      doc.fontSize(10).text(`Make/Model: ${vehicleMakeModel || "N/A"}`);
-      if (vehicleYear) {
-        doc.fontSize(10).text(`Year: ${vehicleYear}`);
-      }
-      doc.moveDown();
-    }
-
-    doc.fontSize(11).text("Items:", {underline: true});
-    doc.moveDown(0.5);
-    for (const item of lineItems || []) {
-      const lineTotal = (item.qty || 0) * (item.unitCost || 0);
-      doc.fontSize(10).text(
-        `${item.description || "Item"}  x${item.qty}  -  ${lineTotal.toLocaleString()} ${currency}`
-      );
-    }
-    if (laborCost) {
-      doc.fontSize(10).text(`Labor Charges  -  ${laborCost.toLocaleString()} ${currency}`);
-    }
-
-    doc.moveDown();
-    doc.fontSize(10).text(`Subtotal: ${subtotal.toLocaleString()} ${currency}`, {align: "right"});
-    doc.fontSize(10).text(`Tax (${(taxRate * 100).toFixed(1)}%): ${tax.toLocaleString()} ${currency}`, {align: "right"});
-    doc.fontSize(13).text(`Grand Total: ${total.toLocaleString()} ${currency}`, {align: "right"});
-
-    doc.end();
-  });
-}
-async function uploadInvoicePdfAndGetUrl(
-  pdfBuffer: Buffer,
-  garageId: string,
-  invoiceId: string
-): Promise<string> {
-  const bucket = admin.storage().bucket();
-  const filePath = `invoices/${garageId}/${invoiceId}.pdf`;
-  const file = bucket.file(filePath);
-
-  await file.save(pdfBuffer, {
-    contentType: "application/pdf",
-    metadata: {cacheControl: "private, max-age=0"},
-  });
-
-  const [url] = await file.getSignedUrl({
-    action: "read",
-    expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
-  });
-
-  return url;
-}
-async function sendWhatsAppTemplate(
-  apiKey: string,
-  sessionId: string,
-  toPhone: string,
-  customerName: string,
-  invoiceNumber: string,
-  amountText: string,
-  pdfUrl: string
-): Promise<void> {
-  const caption = `Hi ${customerName}, your invoice ${invoiceNumber} for ${amountText} has been paid. Thank you!`;
-  const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/messages/send-document`, {
-    method: "POST",
-    headers: {"X-API-Key": apiKey, "Content-Type": "application/json"},
-    body: JSON.stringify({
-      chatId: toChatId(toPhone),
-      url: pdfUrl,
-      filename: `invoice-${invoiceNumber}.pdf`,
-      mimetype: "application/pdf",
-      caption,
-    }),
-  });
-  if (!res.ok) {
-    throw new Error(`OpenWA document send failed: ${await res.text()}`);
-  }
-}
-
-// ---- Azure VM auto start/stop (save cost â€” VM only runs during business hours) ----
-const AZURE_RESOURCE_GROUP = "garage-whatsapp-rg";
-const AZURE_VM_NAME = "openwa-vm-azure";
-
-async function getAzureToken(): Promise<string> {
-  const res = await fetch(
-    `https://login.microsoftonline.com/${azureTenant.value()}/oauth2/token`,
-    {
-      method: "POST",
-      headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: azureAppId.value(),
-        client_secret: azurePassword.value(),
-        resource: "https://management.azure.com/",
-      }),
-    }
-  );
-  const data: any = await res.json();
-  if (!res.ok) throw new Error(`Azure auth failed: ${JSON.stringify(data)}`);
-  return data.access_token;
-}
-
-async function azureVmAction(action: "start" | "deallocate"): Promise<void> {
-  const token = await getAzureToken();
-  const url = `https://management.azure.com/subscriptions/${azureSubscriptionId.value()}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/virtualMachines/${AZURE_VM_NAME}/${action}?api-version=2023-09-01`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {"Authorization": `Bearer ${token}`},
-  });
-  if (!res.ok && res.status !== 202) {
-    throw new Error(`Azure ${action} failed: ${await res.text()}`);
-  }
-  logger.info(`Azure VM ${action} triggered`, {vm: AZURE_VM_NAME});
-}
-
-// Stops (deallocates) the VM at 8:00 PM Kigali time (after business hours) â€” this is
-// what actually stops billing, since a deallocated VM is not charged for compute.
-export const stopGarageVm = onSchedule(
-  {schedule: "0 20 * * *", timeZone: "Africa/Kigali", secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
-  async () => {
-    await azureVmAction("deallocate");
-  }
-);
-
-
-async function ensureVmRunning(): Promise<void> {
-  const db = admin.firestore();
-  const stateRef = db.collection("system").doc("vmState");
-  await azureVmAction("start");
-  await stateRef.set({lastActivity: admin.firestore.FieldValue.serverTimestamp(), running: true}, {merge: true});
-}
-
-async function waitForVmReady(): Promise<void> {
-  const maxWaitMs = 90000;
-  const intervalMs = 5000;
-  const startTime = Date.now();
-  while (Date.now() - startTime < maxWaitMs) {
-    try {
-      const res = await fetch(`${openwaUrl.value()}`, {method: "GET"});
-      if (res.ok || res.status === 404) {
-        logger.info("OpenWA service is ready");
-        return;
-      }
-    } catch (err) {
-      // VM/service not up yet, keep waiting
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error("Timed out waiting for VM/WhatsApp service to become ready");
-}
-
-async function ensureSessionActive(sessionId: string): Promise<void> {
-  const apiKey = openwaApiKey.value();
-  await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}/start`, {
-    method: "POST",
-    headers: {"X-API-Key": apiKey},
-  });
-  const maxWaitMs = 60000;
-  const intervalMs = 3000;
-  const startTime = Date.now();
-  while (Date.now() - startTime < maxWaitMs) {
-    const res = await fetch(`${openwaUrl.value()}/api/sessions/${sessionId}`, {
-      headers: {"X-API-Key": apiKey},
-    });
-    if (res.ok) {
-      const data: any = await res.json();
-      if (data.status === "ready" || data.status === "connected" || data.status === "active") {
-        return;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error(`Timed out waiting for WhatsApp session ${sessionId} to become active`);
-}
-
-// Idle-checker: runs every 10 min. Stops the VM if no activity for 15+ min — saves cost
-// since the VM only needs to run right after an invoice is paid or a manual send.
-export const stopIdleVm = onSchedule(
-  {schedule: "*/10 * * * *", secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
-  async () => {
-    const db = admin.firestore();
-    const stateRef = db.collection("system").doc("vmState");
-    const snap = await stateRef.get();
-    const data = snap.data();
-    if (!data?.running) return;
-    const lastActivity = data.lastActivity?.toDate?.() || new Date(0);
-    const idleMinutes = (Date.now() - lastActivity.getTime()) / 60000;
-    if (idleMinutes >= 15) {
-      await azureVmAction("deallocate");
-      await stateRef.set({running: false}, {merge: true});
-      logger.info("VM stopped due to inactivity");
-    }
-  }
-);
-
