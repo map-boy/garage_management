@@ -1,12 +1,57 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useInvoices } from '../hooks/useInvoices';
 import { useClients } from '../hooks/useClients';
 import { Table, TableRow, TableCell } from '../components/ui/Table';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
-import { Search, FileText, Eye, Printer, Filter } from 'lucide-react';
-import { formatCurrency, formatDate } from '../lib/utils';
+import { Search, FileText, Eye, Printer, Filter, CheckCircle2, AlertTriangle, Clock, Minus } from 'lucide-react';
+import { formatCurrency, formatDate, calculateInvoiceTotals } from '../lib/utils';
+import type { Invoice } from '../types';
+
+/**
+ * Compact delivery indicator for the list view. An operator scanning the day's
+ * invoices needs to spot the ones that never reached the customer without
+ * opening each record.
+ */
+function WhatsAppStatusCell({ invoice }: { invoice: Invoice }) {
+  const delivery = invoice.status === 'Paid'
+    ? invoice.whatsappPaid
+    : invoice.whatsappIssued;
+
+  switch (delivery?.state) {
+    case 'sent':
+      return (
+        <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-600" title="Delivered on WhatsApp">
+          <CheckCircle2 className="w-3.5 h-3.5" /> Sent
+        </span>
+      );
+    case 'sending':
+      return (
+        <span className="inline-flex items-center gap-1 text-xs font-bold text-blue-600" title="Delivery in progress">
+          <Clock className="w-3.5 h-3.5" /> Sending
+        </span>
+      );
+    case 'failed':
+      return (
+        <span className="inline-flex items-center gap-1 text-xs font-bold text-rose-600" title={delivery.lastError || 'Delivery failed'}>
+          <AlertTriangle className="w-3.5 h-3.5" /> Failed
+        </span>
+      );
+    case 'skipped':
+      return (
+        <span className="inline-flex items-center gap-1 text-xs font-bold text-amber-600" title={delivery.lastError || 'Skipped'}>
+          <AlertTriangle className="w-3.5 h-3.5" /> Skipped
+        </span>
+      );
+    default:
+      return (
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-gray-300" title="Not sent yet">
+          <Minus className="w-3.5 h-3.5" />
+        </span>
+      );
+  }
+}
 
 export function InvoicesPage() {
   const navigate = useNavigate();
@@ -15,16 +60,27 @@ export function InvoicesPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Paid' | 'Unpaid'>('All');
 
-  const filtered = invoices.filter(inv => {
-    const client = clients.find(c => c.id === inv.clientId);
-    const matchesSearch = 
-      inv.id.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      client?.name.toLowerCase().includes(searchTerm.toLowerCase());
-    
-    const matchesStatus = statusFilter === 'All' || inv.status === statusFilter;
+  const filtered = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    const clientNameById = new Map(clients.map(c => [c.id, c.name?.toLowerCase() ?? '']));
 
-    return matchesSearch && matchesStatus;
-  }).reverse();
+    return invoices
+      .filter(inv => {
+        // `client?.name.toLowerCase().includes(...)` used to yield undefined
+        // for an invoice whose client had been deleted, which is falsy — so
+        // those invoices vanished from the list entirely, even with an empty
+        // search box. Coercing to a boolean keeps orphaned invoices findable.
+        const matchesSearch =
+          !term ||
+          inv.id.toLowerCase().includes(term) ||
+          (clientNameById.get(inv.clientId) ?? '').includes(term);
+
+        return matchesSearch && (statusFilter === 'All' || inv.status === statusFilter);
+      })
+      // Newest first. Sorting by issue date rather than reversing insertion
+      // order keeps the list stable as Firestore streams updates in.
+      .sort((a, b) => (b.issuedAt ?? '').localeCompare(a.issuedAt ?? ''));
+  }, [invoices, clients, searchTerm, statusFilter]);
 
   const handlePrint = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -67,11 +123,10 @@ export function InvoicesPage() {
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-        <Table headers={['Invoice #', 'Client', 'Date', 'Total Amount', 'Status', 'Actions']}>
+        <Table headers={['Invoice #', 'Client', 'Date', 'Total Amount', 'Status', 'WhatsApp', 'Actions']}>
           {filtered.map((inv) => {
             const client = clients.find(c => c.id === inv.clientId);
-            const subtotal = inv.lineItems.reduce((acc, item) => acc + (item.qty * item.unitCost), 0) + inv.laborCost;
-            const total = subtotal * (1 + inv.taxRate);
+            const { total } = calculateInvoiceTotals(inv.lineItems, inv.laborCost, inv.taxRate);
 
             return (
               <TableRow key={inv.id} onClick={() => navigate(`/invoices/${inv.id}`)}>
@@ -89,6 +144,9 @@ export function InvoicesPage() {
                     {inv.status}
                   </Badge>
                 </TableCell>
+                <TableCell>
+                  <WhatsAppStatusCell invoice={inv} />
+                </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
                     <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${inv.id}`); }}>
@@ -104,7 +162,7 @@ export function InvoicesPage() {
           })}
           {filtered.length === 0 && (
             <tr>
-              <td colSpan={6} className="px-4 py-12 text-center text-gray-400 italic">No invoices found.</td>
+              <td colSpan={7} className="px-4 py-12 text-center text-gray-400 italic">No invoices found.</td>
             </tr>
           )}
         </Table>

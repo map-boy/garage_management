@@ -7,8 +7,9 @@ import { useJobs } from '../hooks/useJobs';
 import { useStock } from '../hooks/useStock';
 import { InvoiceTemplate } from '../components/invoices/InvoiceTemplate';
 import { InvoiceLineItems } from '../components/invoices/InvoiceLineItems';
+import { WhatsAppDeliveryButton } from '../components/invoices/WhatsAppDeliveryButton';
 import { Button } from '../components/ui/Button';
-import { ArrowLeft, Printer, CheckCircle, Save, Pencil } from 'lucide-react';
+import { ArrowLeft, Printer, CheckCircle, Save, Pencil, MessageCircle } from 'lucide-react';
 
 export function InvoiceDetailPage() {
   const { id } = useParams();
@@ -38,6 +39,12 @@ export function InvoiceDetailPage() {
   if (!invoice) return <div className="p-8 text-center text-gray-500 font-bold">Invoice Not Found</div>;
 
   const handleMarkAsPaid = () => {
+    // Marking paid is what triggers the customer's WhatsApp receipt, so it is
+    // worth one confirmation — an accidental click messages a real customer.
+    if (!window.confirm(
+      `Mark invoice ${invoice.id} as paid?` +
+      (client?.phone ? `\n\nA receipt will be sent to ${client.name || 'the client'} on WhatsApp.` : '')
+    )) return;
     updateInvoice({ ...invoice, status: 'Paid' });
   };
 
@@ -76,6 +83,18 @@ export function InvoiceDetailPage() {
             <Printer className="w-4 h-4 mr-2" /> Print
           </Button>
         </div>
+      </div>
+
+      {/* WhatsApp delivery — hidden when printing, since it is a control
+          panel for the operator, not part of the customer's document. */}
+      <div className="print:hidden max-w-4xl mx-auto bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <MessageCircle className="w-4 h-4 text-emerald-600" />
+          <h3 className="text-xs font-black text-gray-900 uppercase tracking-wide">
+            WhatsApp Delivery
+          </h3>
+        </div>
+        <WhatsAppDeliveryButton invoice={invoice} clientPhone={client?.phone} />
       </div>
 
       {isEditing ? (
