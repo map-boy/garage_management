@@ -133,25 +133,6 @@ service cloud.firestore {
         allow write: if false;
       }
 
-      // ---- Scheduled broadcasts --------------------------------------
-      match /scheduledMessages/{messageId} {
-        allow read: if belongsToGarage(garageId);
-        allow create: if belongsToGarage(garageId) && isManagerRole()
-                      && request.resource.data.message is string
-                      && request.resource.data.message.size() > 0
-                      && request.resource.data.message.size() <= 4096
-                      && request.resource.data.sendDate is string
-                      && request.resource.data.sendDate.matches('\\d{4}-\\d{2}-\\d{2}')
-                      && request.resource.data.status == 'pending';
-        // Send progress (status, sentCount, lastClientId) belongs to the
-        // scheduler; an operator may cancel, but not rewrite history.
-        allow update: if belongsToGarage(garageId) && isManagerRole()
-                      && request.resource.data.status == 'cancelled'
-                      && resource.data.status == 'pending';
-        allow delete: if belongsToGarage(garageId) && isManagerRole()
-                      && resource.data.status != 'in_progress';
-      }
-
       // ---- Archived record chunks ------------------------------------
       // A month-close snapshot stores its jobs and invoices as chunks one
       // level deeper than the wildcard below reaches ({docId} matches a
@@ -168,12 +149,10 @@ service cloud.firestore {
       // This wildcard also matches the collections handled above, and rules
       // combine with OR — so without the exclusion list a broad `allow write`
       // here would silently re-grant everything the specific rules just
-      // withheld (delivery records, audit log, broadcast progress).
+      // withheld (delivery records, the audit log).
       match /{collectionName}/{docId} {
         function hasOwnWriteRule() {
-          return collectionName in [
-            'invoices', 'whatsappLogs', 'scheduledMessages'
-          ];
+          return collectionName in ['invoices', 'whatsappLogs'];
         }
 
         // Only the audit log narrows *read* access beyond "any staff in this

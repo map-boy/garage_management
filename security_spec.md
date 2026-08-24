@@ -46,12 +46,13 @@ declare itself `BOSS`.
    billed to the garage.
 5. **The audit log is append-only and server-written.** `whatsappLogs` is
    readable by managers and owners only, and not writable by any client.
-6. Broadcast progress (`status`, `sentCount`, `lastClientId`) belongs to the
-   scheduler. An operator may cancel a pending broadcast; they may not rewrite
-   what was already sent.
-7. `system/vmState` is not client-accessible in either direction.
-8. Every message body and phone number crossing a callable is length-capped
+6. `system/vmState` is not client-accessible in either direction.
+7. Every message body and phone number crossing a callable is length-capped
    and normalised before use.
+8. **No code path messages a customer without a signed-in operator.** There
+   are no Firestore triggers and no scheduled senders; every send originates
+   from an authenticated callable. This bounds both spend and reputational
+   risk: the garage's WhatsApp number cannot be made to send in bulk.
 
 ## Denial cases (all tested)
 
@@ -63,9 +64,8 @@ declare itself `BOSS`.
 6. Reading another garage's documents, including its invoices and archives.
 7. Writing the audit log from a client; reading it as a technician.
 8. Escalating one's own `role`, or moving oneself to another `garageId`.
-9. A technician scheduling a broadcast, or deleting an invoice.
-10. Creating a broadcast already marked `sent`, or with a malformed date.
-11. Reading `system/vmState`.
+9. A technician deleting an invoice.
+10. Reading `system/vmState`.
 
 ## Known limitations
 

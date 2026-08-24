@@ -170,26 +170,13 @@ export function SettingsPage() {
           <div className="pt-4 border-t border-gray-50 space-y-4">
             <div className="flex items-center gap-2">
               <MessageCircle className="w-4 h-4 text-gray-400" />
-              <h4 className="text-xs font-black uppercase tracking-wide text-gray-700">WhatsApp Automation</h4>
+              <h4 className="text-xs font-black uppercase tracking-wide text-gray-700">WhatsApp</h4>
             </div>
-            <label className="flex items-start gap-3 p-3 rounded-xl border border-gray-100 cursor-pointer hover:bg-gray-50">
-              <input
-                type="checkbox"
-                className="mt-0.5 w-4 h-4 rounded-sm accent-emerald-600"
-                checked={settings.whatsappNotifyOnIssue ?? false}
-                onChange={(e) => setSettings({ ...settings, whatsappNotifyOnIssue: e.target.checked })}
-              />
-              <span>
-                <span className="block text-sm font-bold text-gray-800">
-                  Send the invoice when the job is done
-                </span>
-                <span className="block text-xs text-gray-500 mt-0.5">
-                  The client gets the invoice PDF on WhatsApp as soon as it is issued.
-                  A paid receipt is always sent when the invoice is marked paid, whether
-                  or not this is on. Each message uses one of your monthly allowance.
-                </span>
-              </span>
-            </label>
+            <p className="text-xs text-gray-500 leading-relaxed p-3 rounded-xl bg-gray-50 border border-gray-100">
+              Nothing is sent to a client automatically. To send an invoice or a
+              paid receipt, open the invoice and press <strong>Send on WhatsApp</strong>.
+              Each message sent uses one of your monthly allowance.
+            </p>
           </div>
 
           <div className="pt-4 border-t border-gray-50 space-y-4">

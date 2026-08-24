@@ -39,6 +39,10 @@ function formatWhen(date: Date): string {
  * Shows whether the client actually received this invoice on WhatsApp, and
  * lets an operator send or retry it.
  *
+ * This is the only path by which a client is messaged — there are no
+ * triggers or scheduled senders behind it, so an invoice reaches the customer
+ * exactly when someone here decides it should.
+ *
  * The delivery record is written by Cloud Functions and streams back through
  * the same Firestore listener that feeds the rest of the page, so pressing
  * Send updates this in place without a refresh. The backend enforces
@@ -154,7 +158,7 @@ export function WhatsAppDeliveryButton({
           <span>
             Last attempt failed: {delivery.lastError}
             {delivery.attempts ? ` (attempt ${delivery.attempts})` : ''}
-            . It will also be retried automatically.
+            . Press Retry to try again.
           </span>
         </p>
       )}

@@ -56,9 +56,6 @@ await testEnv.withSecurityRulesDisabled(async (ctx) => {
     whatsappPaid: {state: "sent", attempts: 1},
   });
   await setDoc(doc(db, "garages/garageA/whatsappLogs/log1"), {outcome: "sent"});
-  await setDoc(doc(db, "garages/garageA/scheduledMessages/sm1"), {
-    message: "Hi", sendDate: "2026-12-25", status: "pending",
-  });
 });
 
 const owner1 = testEnv.authenticatedContext("owner1").firestore();
@@ -120,18 +117,6 @@ await check("user cannot escalate their own role",
 await check("user cannot move themselves to another garage",
   assertFails(updateDoc(doc(owner1, "users/owner1"), {garageId: "garageB"})));
 
-await check("technician cannot schedule a broadcast",
-  assertFails(addDoc(collection(tech1, "garages/garageA/scheduledMessages"),
-    {message: "spam", sendDate: "2026-12-25", status: "pending"})));
-
-await check("broadcast cannot be created already marked sent",
-  assertFails(addDoc(collection(owner1, "garages/garageA/scheduledMessages"),
-    {message: "x", sendDate: "2026-12-25", status: "sent"})));
-
-await check("broadcast sendDate must be a real date string",
-  assertFails(addDoc(collection(owner1, "garages/garageA/scheduledMessages"),
-    {message: "x", sendDate: "someday", status: "pending"})));
-
 await check("system/vmState is not client readable",
   assertFails(getDoc(doc(owner1, "system/vmState"))));
 
@@ -158,14 +143,6 @@ await check("staff creates an invoice",
 await check("staff marks an invoice paid",
   assertSucceeds(updateDoc(doc(owner1, "garages/garageA/invoices/INV1"),
     {status: "Paid"})));
-
-await check("manager schedules a valid broadcast",
-  assertSucceeds(addDoc(collection(owner1, "garages/garageA/scheduledMessages"),
-    {message: "Merry Christmas", sendDate: "2026-12-25", status: "pending"})));
-
-await check("manager cancels a pending broadcast",
-  assertSucceeds(updateDoc(doc(owner1, "garages/garageA/scheduledMessages/sm1"),
-    {status: "cancelled"})));
 
 await check("manager reads the audit log",
   assertSucceeds(getDoc(doc(owner1, "garages/garageA/whatsappLogs/log1"))));

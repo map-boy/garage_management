@@ -1,9 +1,5 @@
 import {setGlobalOptions} from "firebase-functions";
 import {onCall, HttpsError} from "firebase-functions/https";
-import {
-  onDocumentCreated,
-  onDocumentUpdated,
-} from "firebase-functions/v2/firestore";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import * as logger from "firebase-functions/logger";
 import * as admin from "firebase-admin";
@@ -37,8 +33,6 @@ import {
   stopVm,
   touchVmActivity,
 } from "./lib/vm";
-import {sleep} from "./lib/http";
-
 if (!admin.apps.length) {
   admin.initializeApp();
 }
@@ -51,71 +45,21 @@ if (!admin.apps.length) {
 setGlobalOptions({maxInstances: 10, region: "us-central1"});
 
 // ---------------------------------------------------------------------------
-// Invoice automation
+// Invoice messaging
 // ---------------------------------------------------------------------------
 
 /**
- * Sends the invoice as soon as it is issued (i.e. the job is done).
- * Opt-in per garage via `whatsappNotifyOnIssue` so a garage that only wants
- * payment receipts is not forced into two messages per job.
- */
-export const onInvoiceIssued = onDocumentCreated(
-  {
-    document: "garages/{garageId}/invoices/{invoiceId}",
-    secrets: WHATSAPP_SECRETS,
-    timeoutSeconds: 300,
-    retry: false,
-  },
-  async (event) => {
-    const invoice = event.data?.data();
-    if (!invoice) return;
-
-    const {garageId, invoiceId} = event.params;
-    const garage = (await admin.firestore()
-      .collection("garages").doc(garageId).get()).data();
-
-    if (garage?.whatsappNotifyOnIssue !== true) {
-      logger.debug("Issue notification disabled for garage", {garageId});
-      return;
-    }
-    // An invoice created already marked Paid is handled as a paid receipt
-    // only, so the customer does not get two messages a second apart.
-    if (invoice.status === "Paid") {
-      await deliverInvoice(garageId, invoiceId, "paid");
-      return;
-    }
-    await deliverInvoice(garageId, invoiceId, "issued");
-  }
-);
-
-/**
- * Sends the paid receipt when an invoice transitions to Paid.
- * The transition guard (before !== Paid, after === Paid) plus the claim in
- * deliverInvoice means edits to an already-paid invoice never re-send.
- */
-export const onInvoicePaid = onDocumentUpdated(
-  {
-    document: "garages/{garageId}/invoices/{invoiceId}",
-    secrets: WHATSAPP_SECRETS,
-    timeoutSeconds: 300,
-    retry: false,
-  },
-  async (event) => {
-    const before = event.data?.before.data();
-    const after = event.data?.after.data();
-    if (!before || !after) return;
-    if (before.status === "Paid" || after.status !== "Paid") return;
-
-    const {garageId, invoiceId} = event.params;
-    await deliverInvoice(garageId, invoiceId, "paid");
-  }
-);
-
-/**
- * Manual send / resend, driven by the button on the invoice screen.
- * `force` lets an operator re-send a message that already succeeded (for
- * example after the customer changed number); everything else is guarded by
- * the same claim as the automatic path.
+ * Sends an invoice to the client, driven by the button on the invoice screen.
+ *
+ * WhatsApp is entirely operator-driven: nothing in this codebase messages a
+ * customer without someone pressing a button. There are no Firestore triggers
+ * and no scheduled senders, so marking an invoice paid has no side effect
+ * beyond recording the payment.
+ *
+ * `kind` only selects the wording ("your invoice" vs "we received your
+ * payment"). `force` re-sends a message that already succeeded, for example
+ * after the customer changed number. Delivery is still claimed
+ * transactionally, so two operators pressing Send at once send once.
  */
 export const sendInvoiceWhatsApp = onCall(
   {secrets: WHATSAPP_SECRETS, timeoutSeconds: 300},
@@ -134,50 +78,6 @@ export const sendInvoiceWhatsApp = onCall(
       );
     }
     return {success: true, to: result.to};
-  }
-);
-
-/**
- * Sweeps up deliveries that failed for transient reasons (VM asleep, session
- * restarting, network blip). Runs hourly during business hours so a paid
- * invoice always reaches the customer eventually, without an operator having
- * to notice and press Resend.
- */
-export const retryFailedInvoiceMessages = onSchedule(
-  {
-    schedule: "15 8-19 * * *",
-    timeZone: "Africa/Kigali",
-    secrets: WHATSAPP_SECRETS,
-    timeoutSeconds: 540,
-  },
-  async () => {
-    const db = admin.firestore();
-    const cutoff = admin.firestore.Timestamp.fromMillis(
-      Date.now() - 24 * 60 * 60 * 1000
-    );
-    const MAX_ATTEMPTS = 5;
-    const MAX_PER_RUN = 25;
-
-    for (const kind of ["paid", "issued"] as const) {
-      const field = kind === "paid" ? "whatsappPaid" : "whatsappIssued";
-      const snap = await db.collectionGroup("invoices")
-        .where(`${field}.state`, "==", "failed")
-        .where(`${field}.updatedAt`, ">=", cutoff)
-        .orderBy(`${field}.updatedAt`, "asc")
-        .limit(MAX_PER_RUN)
-        .get();
-
-      for (const doc of snap.docs) {
-        const record = doc.data()?.[field] || {};
-        // Give up after a few tries: past that the cause is structural
-        // (no session linked, bad number) and retrying just burns the VM.
-        if (Number(record.attempts || 0) >= MAX_ATTEMPTS) continue;
-
-        const garageId = doc.ref.parent.parent?.id;
-        if (!garageId) continue;
-        await deliverInvoice(garageId, doc.id, kind);
-      }
-    }
   }
 );
 
@@ -228,132 +128,6 @@ export const sendManualWhatsApp = onCall(
         "internal",
         error?.message || "WhatsApp send failed"
       );
-    }
-  }
-);
-
-/**
- * Daily broadcast of scheduled (holiday) messages.
- *
- * Paced deliberately: WhatsApp bans numbers that fire hundreds of messages
- * back to back, and a ban costs the garage its only channel. Progress is
- * checkpointed on the scheduled-message document so a function timeout
- * resumes where it left off instead of re-messaging everyone.
- */
-export const sendScheduledMessages = onSchedule(
-  {
-    schedule: "0 8 * * *",
-    timeZone: "Africa/Kigali",
-    secrets: WHATSAPP_SECRETS,
-    timeoutSeconds: 540,
-  },
-  async () => {
-    const PER_MESSAGE_DELAY_MS = 2500;
-    const TIME_BUDGET_MS = 480000; // leave headroom before the 540s timeout
-    const startedAt = Date.now();
-
-    const todayStr = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Africa/Kigali",
-      year: "numeric", month: "2-digit", day: "2-digit",
-    }).format(new Date());
-
-    const dueSnap = await admin.firestore()
-      .collectionGroup("scheduledMessages")
-      .where("sendDate", "==", todayStr)
-      .where("status", "in", ["pending", "in_progress"])
-      .get();
-
-    for (const doc of dueSnap.docs) {
-      const data = doc.data();
-      const garageId = doc.ref.parent.parent?.id;
-      if (!garageId) continue;
-
-      try {
-        await doc.ref.update({status: "in_progress"});
-        await ensureVmReady();
-        const sessionId = await getGarageSessionId(garageId);
-        await ensureSessionActive(garageId, sessionId);
-
-        // Resume from the last client processed on a previous run.
-        const cursor = data.lastClientId || null;
-        let query = admin.firestore()
-          .collection("garages").doc(garageId)
-          .collection("clients")
-          .orderBy(admin.firestore.FieldPath.documentId());
-        if (cursor) query = query.startAfter(cursor);
-
-        const clientsSnap = await query.get();
-        let sentCount = Number(data.sentCount || 0);
-        let failedCount = Number(data.failedCount || 0);
-        let lastClientId = cursor;
-        let exhaustedQuota = false;
-
-        for (const clientDoc of clientsSnap.docs) {
-          if (Date.now() - startedAt > TIME_BUDGET_MS) {
-            logger.info("Broadcast paused on time budget; resumes next run", {
-              garageId, scheduledId: doc.id, sentCount,
-            });
-            break;
-          }
-          lastClientId = clientDoc.id;
-          const client = clientDoc.data();
-          if (!client.phone) continue;
-
-          const reservation = await reserveQuota(garageId);
-          if (!reservation.granted) {
-            logger.warn("Quota exhausted mid-broadcast", {
-              garageId, scheduledId: doc.id,
-            });
-            exhaustedQuota = true;
-            break;
-          }
-          try {
-            await sendWhatsAppText(
-              sessionId,
-              `+${String(client.phone).replace(/[^\d]/g, "")}`,
-              data.message
-            );
-            sentCount++;
-          } catch (err: any) {
-            await releaseQuota(garageId, reservation.period);
-            failedCount++;
-            logger.error("Scheduled message failed for client", {
-              garageId, clientId: clientDoc.id, error: err?.message,
-            });
-          }
-          await sleep(PER_MESSAGE_DELAY_MS);
-        }
-
-        const finished = exhaustedQuota ||
-          lastClientId === clientsSnap.docs[clientsSnap.docs.length - 1]?.id ||
-          clientsSnap.empty;
-
-        await doc.ref.update({
-          status: finished ? "sent" : "in_progress",
-          lastClientId,
-          sentCount,
-          failedCount,
-          // Recorded so "sent" against a partial client list is explainable
-          // later — the broadcast stopped because the allowance ran out, not
-          // because every client was reached.
-          quotaExhausted: exhaustedQuota,
-          ...(finished ?
-            {sentAt: admin.firestore.FieldValue.serverTimestamp()} :
-            {}),
-        });
-        await touchVmActivity();
-        logger.info("Scheduled broadcast progress", {
-          garageId, scheduledId: doc.id, sentCount, failedCount, finished,
-        });
-      } catch (error: any) {
-        await doc.ref.update({
-          status: "pending",
-          lastError: error?.message || String(error),
-        }).catch(() => null);
-        logger.error("Scheduled message batch failed", {
-          garageId, scheduledId: doc.id, error: error?.message,
-        });
-      }
     }
   }
 );

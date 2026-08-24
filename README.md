@@ -1,7 +1,7 @@
 # SmartGarage Pro
 
 Garage management for workshops: clients, vehicles, job cards, stock,
-invoicing, and automated WhatsApp delivery of invoices and receipts.
+invoicing, and operator-driven WhatsApp delivery of invoices and receipts.
 
 Two apps share one Firebase project:
 
@@ -40,7 +40,6 @@ garages/{garageId}                           settings, quota, WhatsApp session
   ├── reminders/{id}
   ├── invoices/{id}                          + whatsappIssued / whatsappPaid
   ├── whatsappLogs/{id}                      append-only audit trail
-  ├── scheduledMessages/{id}                 holiday broadcasts
   └── archives/{id}                          month-close manifest
         └── records/{chunk}                  archived jobs + invoices
 system/vmState                               Azure VM run state
@@ -48,25 +47,24 @@ system/vmState                               Azure VM run state
 
 ---
 
-## WhatsApp invoice automation
+## WhatsApp invoice delivery
 
-Two moments trigger a message, both carrying a generated PDF:
+**Nothing is ever sent automatically.** There are no Firestore triggers and no
+scheduled senders: a client is messaged only when a person opens the invoice
+and presses *Send on WhatsApp*, which calls `sendInvoiceWhatsApp`. Issuing an
+invoice or marking it paid has no outward effect on its own.
 
-| Trigger | Function | Enabled by |
-| --- | --- | --- |
-| Invoice issued (job complete) | `onInvoiceIssued` | Settings → *Send the invoice when the job is done* (off by default) |
-| Invoice marked Paid | `onInvoicePaid` | Always |
-
-Staff can also send or re-send from the invoice screen, which calls
-`sendInvoiceWhatsApp`.
+The message wording follows the invoice's state — "your invoice" when unpaid,
+"we received your payment" when paid — and carries a generated PDF either way.
 
 ### How a delivery runs
 
 1. **Claim.** A Firestore transaction moves the invoice's delivery record to
-   `sending`. Firestore triggers are at-least-once and an operator can press
-   Send while a trigger is already running, so this claim is what guarantees
-   the customer is not messaged twice and the garage billed twice. A claim
-   older than 10 minutes is treated as abandoned and can be retaken.
+   `sending`. This is what guarantees a customer is never messaged twice and
+   the garage never billed twice — a double click, or two staff on two
+   machines pressing Send at the same moment, still sends once. A claim older
+   than 10 minutes is treated as abandoned and can be retaken, so an
+   interrupted send never leaves the invoice permanently stuck.
 2. **Wake the VM**, before reserving quota — waking is the step most likely to
    fail, and a reservation held across a 90-second boot can be lost.
 3. **Reserve quota** (transactional, resets monthly).
@@ -75,9 +73,8 @@ Staff can also send or re-send from the invoice screen, which calls
    quota reservation is released — a garage is never billed for a message its
    customer never received.
 
-`retryFailedInvoiceMessages` sweeps failed deliveries hourly during business
-hours (max 5 attempts each), so a transient failure resolves itself without an
-operator noticing.
+A failed send stays visible on the invoice with its reason, and is retried
+only when someone presses Retry. Nothing retries in the background.
 
 ### Delivery states
 
@@ -122,8 +119,8 @@ npm run build
 firebase deploy --only hosting,firestore:rules,firestore:indexes,functions
 ```
 
-Deploy `firestore:indexes` whenever a query changes. The scheduled sweeps use
-collection-group queries that fail without their composite indexes.
+Deploy `firestore:indexes` whenever a query changes; a query without its
+composite index fails at runtime, not at deploy time.
 
 ---
 
@@ -131,7 +128,7 @@ collection-group queries that fail without their composite indexes.
 
 ```bash
 npm run lint         # typecheck the app
-npm run test:rules   # 31 Firestore authorization cases (needs Java)
+npm run test:rules   # 26 Firestore authorization cases (needs Java)
 npm test             # both
 npm --prefix functions run lint && npm --prefix functions run build
 ```
@@ -146,8 +143,8 @@ only shows up when executed. It has already caught one such leak.
 ## Operations
 
 **A customer did not get their invoice.** Open the invoice: the WhatsApp panel
-shows the delivery state and the last error. `failed` retries automatically;
-`skipped` needs a fix (usually a missing phone number) then a manual Send. The
+shows the delivery state and the last error. Press Retry once the cause is
+addressed — `skipped` usually means a missing phone number on the client. The
 full history is in `garages/{garageId}/whatsappLogs`.
 
 **Messages stopped for everyone.** Check the quota on the owner dashboard. The
@@ -180,8 +177,9 @@ not weeks:
 - **Month-close archives are chunked.** Firestore caps a document at 1 MiB;
   packing a month of records into one document fails, and fails at the worst
   moment — when closing the month.
-- **Broadcasts are paced** at one message every 2.5 seconds and checkpoint
-  their progress. WhatsApp bans numbers that fire hundreds of messages back to
-  back, and a ban costs the garage its only channel.
+- **Sending is operator-driven only.** Beyond being the behaviour the garage
+  asked for, this is also what keeps the WhatsApp number safe: bulk and
+  automated sending is what gets numbers banned, and a ban costs the garage
+  its only channel.
 - **The audit log is pruned** after 90 days: long enough to settle a billing
   dispute, short enough that it never becomes a cost of its own.

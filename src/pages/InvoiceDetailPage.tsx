@@ -39,12 +39,9 @@ export function InvoiceDetailPage() {
   if (!invoice) return <div className="p-8 text-center text-gray-500 font-bold">Invoice Not Found</div>;
 
   const handleMarkAsPaid = () => {
-    // Marking paid is what triggers the customer's WhatsApp receipt, so it is
-    // worth one confirmation — an accidental click messages a real customer.
-    if (!window.confirm(
-      `Mark invoice ${invoice.id} as paid?` +
-      (client?.phone ? `\n\nA receipt will be sent to ${client.name || 'the client'} on WhatsApp.` : '')
-    )) return;
+    // Recording payment has no outward effect: no message is sent unless
+    // someone presses Send on WhatsApp below.
+    if (!window.confirm(`Mark invoice ${invoice.id} as paid?`)) return;
     updateInvoice({ ...invoice, status: 'Paid' });
   };
 
@@ -86,7 +83,9 @@ export function InvoiceDetailPage() {
       </div>
 
       {/* WhatsApp delivery — hidden when printing, since it is a control
-          panel for the operator, not part of the customer's document. */}
+          panel for the operator, not part of the customer's document.
+          This is the only way a client is ever messaged: nothing sends by
+          itself when an invoice is issued or marked paid. */}
       <div className="print:hidden max-w-4xl mx-auto bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
         <div className="flex items-center gap-2 mb-3">
           <MessageCircle className="w-4 h-4 text-emerald-600" />
