@@ -7,15 +7,20 @@ import { useJobs } from '../hooks/useJobs';
 import { useStock } from '../hooks/useStock';
 import { useAuth } from '../context/AuthContext';
 import { InvoiceTemplate } from '../components/invoices/InvoiceTemplate';
-import { InvoiceProfitCalculator } from '../components/invoices/InvoiceProfitCalculator';
 import { InvoiceLineItems } from '../components/invoices/InvoiceLineItems';
 import { Button } from '../components/ui/Button';
 import { formatCurrency } from '../lib/utils';
 import { settingsService } from '../services/settingsService';
-
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { ArrowLeft, Printer, CheckCircle, Save, Pencil, MessageCircle, Loader2 } from 'lucide-react';
 
-
+function normalizePhoneForWhatsApp(phone?: string): string | null {
+  if (!phone) return null;
+  let digits = phone.replace(/[^\d]/g, '');
+  if (digits.startsWith('0')) digits = '250' + digits.slice(1);
+  if (!digits.startsWith('250')) digits = '250' + digits;
+  return digits;
+}
 
 export function InvoiceDetailPage() {
   const { id } = useParams();
@@ -35,6 +40,7 @@ export function InvoiceDetailPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [draftItems, setDraftItems] = useState(invoice?.lineItems || []);
   const [draftLabor, setDraftLabor] = useState(invoice?.laborCost || 0);
+  const [sendingWhatsApp, setSendingWhatsApp] = useState(false);
 
   useEffect(() => {
     if (invoice) {
@@ -56,6 +62,55 @@ export function InvoiceDetailPage() {
 
   const handlePrint = () => {
     window.print();
+  };
+
+  const handleSendWhatsApp = async () => {
+    const waPhone = normalizePhoneForWhatsApp(client?.phone);
+    if (!waPhone) {
+      alert('This client has no phone number on file.');
+      return;
+    }
+    if (!profile?.garageId) {
+      alert('Could not determine garage account. Please re-login.');
+      return;
+    }
+    setSendingWhatsApp(true);
+    try {
+      const settings = settingsService.get();
+      const functions = getFunctions();
+      const getInvoicePdfUrl = httpsCallable(functions, 'getInvoicePdfUrl');
+      const result: any = await getInvoicePdfUrl({
+        garageId: profile.garageId,
+        invoiceId: invoice.id,
+        garageName: settings.garageName,
+        clientName: client?.name || '',
+        clientEmail: client?.email || '',
+        vehiclePlate: vehicle?.plate || '',
+        vehicleMakeModel: vehicle ? `${vehicle.make || ''} ${vehicle.model || ''}`.trim() : '',
+        vehicleYear: vehicle?.year,
+        lineItems: invoice.lineItems,
+        laborCost: invoice.laborCost,
+        taxRate: 0,
+        currency: settings.currency || 'RWF',
+      });
+      const pdfUrl = result.data.url;
+
+      const total = invoice.lineItems.reduce((acc, item) => acc + (item.qty * item.unitCost), 0) + invoice.laborCost;
+
+      const message =
+        `Hello ${client?.name || 'there'}, this is ${settings.garageName}.\n\n` +
+        `Your invoice #${invoice.id} for ${vehicle ? `${vehicle.make} ${vehicle.model} (${vehicle.plate})` : 'your vehicle'} ` +
+        `is ready.\n\nTotal: ${formatCurrency(total)}\nStatus: ${invoice.status}\n\n` +
+        `Download your PDF invoice here:\n${pdfUrl}\n\n` +
+        `Thank you for choosing ${settings.garageName}.`;
+
+      const url = `https://wa.me/${waPhone}?text=${encodeURIComponent(message)}`;
+      window.open(url, '_blank');
+    } catch (err: any) {
+      alert(`Failed to generate invoice PDF: ${err.message || err}`);
+    } finally {
+      setSendingWhatsApp(false);
+    }
   };
 
   return (
@@ -80,6 +135,19 @@ export function InvoiceDetailPage() {
               <CheckCircle className="w-4 h-4 mr-2" /> Mark as Paid
             </Button>
           )}
+          <Button
+            variant="outline"
+            className="bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
+            onClick={handleSendWhatsApp}
+            disabled={sendingWhatsApp}
+          >
+            {sendingWhatsApp ? (
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+            ) : (
+              <MessageCircle className="w-4 h-4 mr-2" />
+            )}
+            {sendingWhatsApp ? 'Generating PDF...' : 'Send via WhatsApp'}
+          </Button>
           <Button variant="outline" onClick={handlePrint}>
             <Printer className="w-4 h-4 mr-2" /> Print
           </Button>
@@ -103,7 +171,6 @@ export function InvoiceDetailPage() {
             client={client}
             vehicle={vehicle}
           />
-          <InvoiceProfitCalculator invoice={invoice} />
         </div>
       )}
     </div>

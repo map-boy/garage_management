@@ -1,4 +1,4 @@
-{
+﻿{
   "compilerOptions": {
     "target": "ES2022",
     "experimentalDecorators": true,
@@ -24,4 +24,5 @@
     "resolveJsonModule": true,
     "noEmit": true
   }
+  ,"exclude": ["node_modules","dist","_backup-*","desktop"]
 }

@@ -1,0 +1,63 @@
+﻿
+                  vehicleYear = vehicle.year;
+              }
+          }
+      }
+      try {
+>         const pdfBuffer = await generateInvoicePdf(garageName, 
+client.name || "", client.email || "", after.id || event.params.invoiceId, 
+vehiclePlate, vehicleMakeModel, vehicleYear, after.lineItems || [], 
+after.laborCost || 0, taxRate, (garage === null || garage === void 0 ? void 
+0 : garage.currency) || "RWF");
+          // Keep the Storage upload for record-keeping, but send the
+          // WhatsApp document as base64 directly â€” OpenWA's in-browser
+          // fetch cannot reliably download external URLs even though the
+          // same URL is fetchable via curl on the same VM.
+          await uploadInvoicePdfAndGetUrl(pdfBuffer, garageId, 
+event.params.invoiceId);
+          const sessionId = await getGarageSessionId(garageId);
+          await ensureSessionActive(sessionId);
+          await sendWhatsAppTemplate(openwaApiKey.value(), sessionId, 
+formatPhone(client.phone), client.name || "", after.id || 
+event.params.invoiceId, `${total.toLocaleString()} ${(garage === null || 
+garage === void 0 ? void 0 : garage.currency) || "RWF"}`, 
+pdfBuffer.toString("base64"));
+          logger.info("WhatsApp paid notification sent", { garageId, 
+clientId });
+          // Only charge the client quota after a confirmed successful send 
+â€”
+          // a failed send must never consume the 1000-message allowance.
+          const allowed = await checkAndIncrementQuota(garageId);
+          if (!allowed) {
+              logger.warn("Send succeeded but quota already exhausted at 
+increment time", { garageId });
+          }
+      if (!sessionId) {
+          throw new Error("No WhatsApp session linked for this garage. Link 
+one in the admin panel first.");
+      }
+      return sessionId;
+  }
+> async function generateInvoicePdf(garageName, clientName, clientEmail, 
+invoiceNumber, vehiclePlate, vehicleMakeModel, vehicleYear, lineItems, 
+laborCost, taxRate, currency) {
+      return new Promise((resolve, reject) => {
+          const doc = new pdfkit_1.default({ margin: 50 });
+          const chunks = [];
+          doc.on("data", (chunk) => chunks.push(chunk));
+          doc.on("end", () => resolve(Buffer.concat(chunks)));
+          doc.on("error", reject);
+          const subtotal = (lineItems || []).reduce((acc, item) => acc + 
+(item.qty || 0) * (item.unitCost || 0), 0) + (laborCost || 0);
+          const tax = subtotal * (taxRate || 0);
+          const total = subtotal + tax;
+          doc.fontSize(20).text(garageName, { align: "center" });
+          doc.moveDown();
+          doc.fontSize(14).text(`Invoice #${invoiceNumber}`, { align: 
+"center" });
+          doc.fontSize(10).fillColor("green").text("PAID", { align: 
+"center" });
+          doc.fillColor("black");
+          doc.moveDown();
+
+

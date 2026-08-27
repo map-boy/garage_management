@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "garage-management-pro",
   "version": "1.0.0",
   "description": "Garage Management Pro - Offline Desktop Suite",
@@ -24,7 +24,7 @@
     ],
     "extraResources": [
       {
-        "from": "../garage/dist",
+        "from": "../dist",
         "to": "app",
         "filter": [
           "**/*"

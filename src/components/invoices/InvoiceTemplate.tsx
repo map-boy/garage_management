@@ -11,9 +11,15 @@ interface InvoiceTemplateProps {
 
 export function InvoiceTemplate({ invoice, client, vehicle }: InvoiceTemplateProps) {
   const settings = settingsService.get();
-  const subtotal = invoice.lineItems.reduce((acc, item) => acc + (item.qty * item.unitCost), 0) + invoice.laborCost;
-  const tax = subtotal * invoice.taxRate;
-  const total = subtotal + tax;
+  // A free service is a line item priced at zero: work the garage absorbed
+  // (a wash after a paint job, cleaning parts it dirtied). It is shown to the
+  // owner so the real cost of the vehicle is visible, but charged at nothing.
+  const chargeable = invoice.lineItems.filter(i => !i.isFree);
+  const freeServices = invoice.lineItems.filter(i => i.isFree);
+  const partsTotal = chargeable.reduce((acc, item) => acc + (item.qty * item.unitCost), 0);
+  // Free to the client, still paid for by the garage - so it counts as spend.
+  const freeCost = freeServices.reduce((acc, item) => acc + (item.qty * item.unitCost), 0);
+  const total = partsTotal + invoice.laborCost + freeCost;
 
   return (
     <div className="bg-white p-8 max-w-4xl mx-auto border border-gray-200 print:border-none print:shadow-none">
@@ -72,7 +78,7 @@ export function InvoiceTemplate({ invoice, client, vehicle }: InvoiceTemplatePro
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {invoice.lineItems.map((item, i) => (
+          {chargeable.map((item, i) => (
             <tr key={i}>
               <td className="py-4 text-sm text-gray-700">{item.description}</td>
               <td className="py-4 text-center text-sm text-gray-700">{item.qty}</td>
@@ -91,19 +97,65 @@ export function InvoiceTemplate({ invoice, client, vehicle }: InvoiceTemplatePro
         </tbody>
       </table>
 
+      {freeServices.length > 0 && (
+
+
+        <div className="mb-8 border border-amber-100 bg-amber-50/40 rounded-lg p-4">
+
+
+          <h3 className="text-xs font-bold text-amber-700 uppercase mb-2">Free Services &mdash; not charged, but paid for by the garage</h3>
+
+
+          <ul className="space-y-1">
+
+
+            {freeServices.map((item, i) => (
+
+
+              <li key={i} className="flex justify-between text-sm text-gray-700">
+
+
+                <span>{item.description}{item.qty > 1 ? ` x${item.qty}` : ''}</span>
+
+
+                <span className="font-bold text-amber-700">{formatCurrency(item.qty * item.unitCost)} <span className="text-[10px] text-gray-400 uppercase">absorbed</span></span>
+
+
+              </li>
+
+
+            ))}
+
+
+          </ul>
+
+
+        </div>
+
+
+      )}
+
+
+
       {/* Totals */}
       <div className="flex justify-end">
         <div className="w-64 space-y-3">
           <div className="flex justify-between text-sm text-gray-500">
-            <span>Subtotal</span>
-            <span>{formatCurrency(subtotal)}</span>
+            <span>Parts &amp; Materials</span>
+            <span>{formatCurrency(partsTotal)}</span>
           </div>
           <div className="flex justify-between text-sm text-gray-500">
-            <span>Tax ({(invoice.taxRate * 100).toFixed(1)}%)</span>
-            <span>{formatCurrency(tax)}</span>
+            <span>Labour</span>
+            <span>{formatCurrency(invoice.laborCost)}</span>
           </div>
+          {freeCost > 0 && (
+            <div className="flex justify-between text-sm text-amber-700">
+              <span>Free services absorbed</span>
+              <span>{formatCurrency(freeCost)}</span>
+            </div>
+          )}
           <div className="flex justify-between items-center text-lg font-black text-gray-900 pt-3 border-t border-gray-900">
-            <span>Grand Total</span>
+            <span>Total Spent</span>
             <span className="text-blue-600">{formatCurrency(total)}</span>
           </div>
         </div>

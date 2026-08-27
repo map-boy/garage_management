@@ -1,5 +1,6 @@
-﻿import {setGlobalOptions} from "firebase-functions";
+import {setGlobalOptions} from "firebase-functions";
 import {onCall, HttpsError} from "firebase-functions/https";
+import {onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {defineSecret} from "firebase-functions/params";
 import * as logger from "firebase-functions/logger";
@@ -49,7 +50,7 @@ async function sendWhatsAppTextOnce(
 
 // OpenWA sometimes returns a 500 on its response layer even though the
 // message was already delivered (confirmed via device testing). A bare
-// 500 is retried once after a short delay before we give up ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â this cuts
+// 500 is retried once after a short delay before we give up — this cuts
 // down on false-negative errors shown to the user for messages that
 // actually went through.
 async function sendWhatsAppText(
@@ -86,33 +87,25 @@ async function checkAndIncrementQuota(garageId: string): Promise<boolean> {
 }
 
 // ---- Auto-send WhatsApp when invoice is marked Paid ----
-export const sendInvoiceWhatsApp = onCall(
-  {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
-  async (request) => {
-    const {garageId, invoiceId} = request.data;
-    if (!garageId || !invoiceId) {
-      throw new HttpsError("invalid-argument", "garageId and invoiceId are required");
-    }
+export const onInvoicePaid = onDocumentUpdated(
+  {document: "garages/{garageId}/invoices/{invoiceId}", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    if (before.status === "Paid" || after.status !== "Paid") return;
 
-    const invoiceSnap = await admin.firestore()
-      .collection("garages").doc(garageId)
-      .collection("invoices").doc(invoiceId).get();
-    const invoice = invoiceSnap.data();
-    if (!invoice) {
-      throw new HttpsError("not-found", "Invoice not found");
-    }
-
-    const clientId = invoice.clientId;
-    if (!clientId) {
-      throw new HttpsError("failed-precondition", "Invoice has no linked client");
-    }
+    const {garageId} = event.params;
+    const clientId = after.clientId;
+    if (!clientId) return;
 
     const clientSnap = await admin.firestore()
       .collection("garages").doc(garageId)
       .collection("clients").doc(clientId).get();
     const client = clientSnap.data();
     if (!client?.phone) {
-      throw new HttpsError("failed-precondition", "Client has no phone number on file");
+      logger.warn("No client phone for paid invoice", {garageId, invoiceId: event.params.invoiceId});
+      return;
     }
 
     const garageSnap = await admin.firestore().collection("garages").doc(garageId).get();
@@ -122,19 +115,19 @@ export const sendInvoiceWhatsApp = onCall(
     await ensureVmRunning();
     await waitForVmReady();
 
-    const subtotal = (invoice.lineItems || []).reduce(
+    const subtotal = (after.lineItems || []).reduce(
       (acc: number, item: any) => acc + item.qty * item.unitCost, 0
-    ) + (invoice.laborCost || 0);
-    const taxRate = 0;
-    const total = subtotal;
+    ) + (after.laborCost || 0);
+    const taxRate = after.taxRate || 0;
+    const total = subtotal + subtotal * taxRate;
 
     let vehiclePlate = "";
     let vehicleMakeModel = "";
     let vehicleYear: number | undefined = undefined;
-    if (invoice.jobId) {
+    if (after.jobId) {
       const jobSnap = await admin.firestore()
         .collection("garages").doc(garageId)
-        .collection("jobs").doc(invoice.jobId).get();
+        .collection("jobs").doc(after.jobId).get();
       const job = jobSnap.data();
       if (job?.vehicleId) {
         const vehicleSnap = await admin.firestore()
@@ -149,69 +142,54 @@ export const sendInvoiceWhatsApp = onCall(
       }
     }
 
+
     try {
       const pdfBuffer = await generateInvoicePdf(
         garageName,
         client.name || "",
         client.email || "",
-        invoice.id || invoiceId,
+        after.id || event.params.invoiceId,
         vehiclePlate,
         vehicleMakeModel,
         vehicleYear,
-        invoice.lineItems || [],
-        invoice.laborCost || 0,
+        after.lineItems || [],
+        after.laborCost || 0,
         taxRate,
         garage?.currency || "RWF"
       );
-      const invoiceUrl = await uploadInvoicePdfAndGetUrl(pdfBuffer, garageId, invoiceId);
+      // Keep the Storage upload for record-keeping, but send the
+      // WhatsApp document as base64 directly — OpenWA's in-browser
+      // fetch cannot reliably download external URLs even though the
+      // same URL is fetchable via curl on the same VM.
+      await uploadInvoicePdfAndGetUrl(
+        pdfBuffer,
+        garageId,
+        event.params.invoiceId
+      );
       const sessionId = await getGarageSessionId(garageId);
       await ensureSessionActive(sessionId);
-      const invoiceNumber = invoice.id || invoiceId;
-      const amountText = `${total.toLocaleString()} ${garage?.currency || "RWF"}`;
-      const message =
-          `Hi ${client.name || ""}, here is your invoice ${invoiceNumber} for ${amountText}.\n\n` +
-          `Download your invoice PDF here:\n${invoiceUrl}`;
-      await sendWhatsAppText(
+      await sendWhatsAppTemplate(
         openwaApiKey.value(),
         sessionId,
         formatPhone(client.phone),
-        message
+        client.name || "",
+        after.id || event.params.invoiceId,
+        `${total.toLocaleString()} ${garage?.currency || "RWF"}`,
+        pdfBuffer.toString("base64")
       );
-      logger.info("WhatsApp invoice sent on demand", {garageId, invoiceId, clientId});
+      logger.info("WhatsApp paid notification sent", {garageId, clientId});
+      // Only charge the client quota after a confirmed successful send —
+      // a failed send must never consume the 1000-message allowance.
       const allowed = await checkAndIncrementQuota(garageId);
       if (!allowed) {
         logger.warn("Send succeeded but quota already exhausted at increment time", {garageId});
       }
-      return {success: true, invoiceUrl};
     } catch (error: any) {
-      logger.error("Invoice WhatsApp send failed", error);
-      throw new HttpsError("internal", error.message || "WhatsApp send failed");
+      logger.error("WhatsApp send failed", error);
     }
   }
 );
 
-// ---- Audit log retention (whatsappLogs is locked server-only in rules) ----
-export const pruneWhatsAppLogs = onSchedule(
-  {schedule: "0 3 * * *", timeZone: "Africa/Kigali", timeoutSeconds: 300},
-  async () => {
-    const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const oldLogsSnap = await admin.firestore()
-      .collectionGroup("whatsappLogs")
-      .where("createdAt", "<", cutoff)
-      .limit(500)
-      .get();
-
-    if (oldLogsSnap.empty) {
-      logger.info("No stale WhatsApp logs to prune");
-      return;
-    }
-
-    const batch = admin.firestore().batch();
-    oldLogsSnap.docs.forEach((doc) => batch.delete(doc.ref));
-    await batch.commit();
-    logger.info("Pruned stale WhatsApp logs", {count: oldLogsSnap.docs.length});
-  }
-);
 // ---- Manual admin send (boss dashboard) ----
 export const sendManualWhatsApp = onCall(
   {secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 180},
@@ -226,7 +204,7 @@ export const sendManualWhatsApp = onCall(
       const sessionId = await getGarageSessionId(garageId);
       await ensureSessionActive(sessionId);
       await sendWhatsAppText(openwaApiKey.value(), sessionId, formatPhone(phoneNumber), message);
-      // Only charge the client quota after a confirmed successful send ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â
+      // Only charge the client quota after a confirmed successful send —
       // a failed send must never consume the 1000-message allowance.
       const allowed = await checkAndIncrementQuota(garageId);
       if (!allowed) {
@@ -332,7 +310,7 @@ export const getWhatsAppQr = onCall(
         method: "POST",
         headers: {"X-API-Key": openwaApiKey.value()},
       }, 15000).catch(() => null);
-      // OpenWA needs a moment after /start to generate the QR ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â poll
+      // OpenWA needs a moment after /start to generate the QR — poll
       // instead of failing on the first "not ready" response.
       const maxWaitMs = 30000;
       const intervalMs = 3000;
@@ -455,6 +433,66 @@ export const restartWhatsAppSession = onCall(
 // Runs once daily at 08:00 Africa/Kigali time. Using an explicit timeZone
 // (not UTC) means "today" always matches the garage's real local date,
 // so a message scheduled for a specific day never fires a day early/late.
+export const sendScheduledMessages = onSchedule(
+  {schedule: "0 8 * * *", timeZone: "Africa/Kigali", secrets: [openwaApiKey, openwaUrl, azureAppId, azurePassword, azureTenant, azureSubscriptionId], timeoutSeconds: 300},
+  async () => {
+    const todayStr = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Africa/Kigali",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(new Date()); // "YYYY-MM-DD"
+
+    const dueSnap = await admin.firestore()
+      .collectionGroup("scheduledMessages")
+      .where("sendDate", "==", todayStr)
+      .get();
+
+    for (const doc of dueSnap.docs) {
+      const data = doc.data();
+      if (data.status !== "pending") continue;
+
+      const garageId = doc.ref.parent.parent?.id;
+      if (!garageId) continue;
+
+      try {
+        await ensureVmRunning();
+        await waitForVmReady();
+        const sessionId = await getGarageSessionId(garageId);
+        await ensureSessionActive(sessionId);
+        const clientsSnap = await admin.firestore()
+          .collection("garages").doc(garageId)
+          .collection("clients").get();
+
+        let sentCount = 0;
+        for (const clientDoc of clientsSnap.docs) {
+          const client = clientDoc.data();
+          if (!client.phone) continue;
+
+          const allowed = await checkAndIncrementQuota(garageId);
+          if (!allowed) {
+            logger.warn("Quota exhausted mid-broadcast", {garageId, scheduledId: doc.id});
+            break;
+          }
+          try {
+            await sendWhatsAppText(openwaApiKey.value(), sessionId, formatPhone(client.phone), data.message);
+            sentCount++;
+          } catch (err) {
+            logger.error("Scheduled message send failed for client", {garageId, clientId: clientDoc.id, err});
+          }
+        }
+
+        await doc.ref.update({
+          status: "sent",
+          sentAt: admin.firestore.FieldValue.serverTimestamp(),
+          sentCount,
+        });
+        logger.info("Scheduled message broadcast complete", {garageId, scheduledId: doc.id, sentCount});
+      } catch (error: any) {
+        logger.error("Scheduled message batch failed", {garageId, scheduledId: doc.id, error});
+      }
+    }
+  }
+);
+
 function formatPhone(phone: string): string {
   const digits = phone.replace(/[^\d+]/g, "");
   return digits.startsWith("+") ? digits : `+${digits}`;
@@ -492,7 +530,8 @@ async function generateInvoicePdf(
     const subtotal = (lineItems || []).reduce(
       (acc, item) => acc + (item.qty || 0) * (item.unitCost || 0), 0
     ) + (laborCost || 0);
-    const total = subtotal;
+    const tax = subtotal * (taxRate || 0);
+    const total = subtotal + tax;
 
     doc.fontSize(20).text(garageName, {align: "center"});
     doc.moveDown();
@@ -531,9 +570,9 @@ async function generateInvoicePdf(
     }
 
     doc.moveDown();
-    doc.fontSize(10).text(`Parts & Materials: ${(subtotal - (laborCost || 0)).toLocaleString()} ${currency}`, {align: "right"});
-    if (laborCost) doc.fontSize(10).text(`Labour: ${laborCost.toLocaleString()} ${currency}`, {align: "right"});
-    doc.fontSize(13).text(`Total Spent: ${total.toLocaleString()} ${currency}`, {align: "right"});
+    doc.fontSize(10).text(`Subtotal: ${subtotal.toLocaleString()} ${currency}`, {align: "right"});
+    doc.fontSize(10).text(`Tax (${(taxRate * 100).toFixed(1)}%): ${tax.toLocaleString()} ${currency}`, {align: "right"});
+    doc.fontSize(13).text(`Grand Total: ${total.toLocaleString()} ${currency}`, {align: "right"});
 
     doc.end();
   });
@@ -554,12 +593,59 @@ async function uploadInvoicePdfAndGetUrl(
 
   const [url] = await file.getSignedUrl({
     action: "read",
-    expires: Date.now() + 365 * 24 * 60 * 60 * 1000, // 1 year
+    expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
   });
 
   return url;
 }
-// ---- Azure VM auto start/stop (save cost ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â VM only runs during business hours) ----
+async function sendWhatsAppTemplateOnce(
+  apiKey: string,
+  sessionId: string,
+  toPhone: string,
+  caption: string,
+  invoiceNumber: string,
+  pdfBase64: string
+): Promise<Response> {
+  return fetchWithTimeout(`${openwaUrl.value()}/api/sessions/${sessionId}/messages/send-document`, {
+    method: "POST",
+    headers: {"X-API-Key": apiKey, "Content-Type": "application/json"},
+    body: JSON.stringify({
+      chatId: toChatId(toPhone),
+      base64: pdfBase64,
+      filename: `invoice-${invoiceNumber}.pdf`,
+      mimetype: "application/pdf",
+      caption,
+    }),
+  }, 30000);
+}
+
+// Same OpenWA engine bug that hits sendWhatsAppText also hits document
+// sends (confirmed via container logs: "Error downloading media" fires
+// on this exact call). Retry once on 5xx before giving up.
+async function sendWhatsAppTemplate(
+  apiKey: string,
+  sessionId: string,
+  toPhone: string,
+  customerName: string,
+  invoiceNumber: string,
+  amountText: string,
+  pdfBase64: string
+): Promise<void> {
+  const caption = `Hi ${customerName}, your invoice ${invoiceNumber} for ${amountText} has been paid. Thank you!`;
+  const delaysMs = [8000, 8000, 15000, 25000];
+  let res = await sendWhatsAppTemplateOnce(apiKey, sessionId, toPhone, caption, invoiceNumber, pdfBase64);
+  for (let i = 0; !res.ok && res.status >= 500 && i < delaysMs.length; i++) {
+    const body = await res.text().catch(() => "");
+    logger.warn(`OpenWA document send returned 5xx (attempt ${i + 1}/${delaysMs.length}), body: ${body}`, {status: res.status});
+    await new Promise((resolve) => setTimeout(resolve, delaysMs[i]));
+    res = await sendWhatsAppTemplateOnce(apiKey, sessionId, toPhone, caption, invoiceNumber, pdfBase64);
+  }
+  if (!res.ok) {
+    throw new Error(`OpenWA document send failed after retries: ${await res.text()}`);
+  }
+}
+
+// ---- Azure VM auto start/stop (save cost â€” VM only runs during business hours) ----
 const AZURE_RESOURCE_GROUP = "garage-whatsapp-rg";
 const AZURE_VM_NAME = "openwa-vm-azure";
 
@@ -595,7 +681,7 @@ async function azureVmAction(action: "start" | "deallocate"): Promise<void> {
   logger.info(`Azure VM ${action} triggered`, {vm: AZURE_VM_NAME});
 }
 
-// Stops (deallocates) the VM at 8:00 PM Kigali time (after business hours) ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â this is
+// Stops (deallocates) the VM at 8:00 PM Kigali time (after business hours) â€” this is
 // what actually stops billing, since a deallocated VM is not charged for compute.
 export const stopGarageVm = onSchedule(
   {schedule: "0 20 * * *", timeZone: "Africa/Kigali", secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
@@ -655,7 +741,7 @@ async function ensureSessionActive(sessionId: string): Promise<void> {
   throw new Error(`Timed out waiting for WhatsApp session ${sessionId} to become active`);
 }
 
-// Idle-checker: runs every 10 min. Stops the VM if no activity for 15+ min ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â saves cost
+// Idle-checker: runs every 10 min. Stops the VM if no activity for 15+ min — saves cost
 // since the VM only needs to run right after an invoice is paid or a manual send.
 export const stopIdleVm = onSchedule(
   {schedule: "*/10 * * * *", secrets: [azureAppId, azurePassword, azureTenant, azureSubscriptionId]},
@@ -675,32 +761,3 @@ export const stopIdleVm = onSchedule(
   }
 );
 
-export const getInvoicePdfUrl = onCall(
-  {timeoutSeconds: 60},
-  async (request) => {
-    const {garageId, invoiceId, garageName, clientName, clientEmail, vehiclePlate, vehicleMakeModel, vehicleYear, lineItems, laborCost, taxRate, currency} = request.data;
-    if (!garageId || !invoiceId) {
-      throw new HttpsError("invalid-argument", "garageId and invoiceId are required");
-    }
-    try {
-      const pdfBuffer = await generateInvoicePdf(
-        garageName || "",
-        clientName || "",
-        clientEmail || "",
-        invoiceId,
-        vehiclePlate || "",
-        vehicleMakeModel || "",
-        vehicleYear,
-        lineItems || [],
-        laborCost || 0,
-        taxRate || 0,
-        currency || "RWF"
-      );
-      const url = await uploadInvoicePdfAndGetUrl(pdfBuffer, garageId, invoiceId);
-      return {url};
-    } catch (error: any) {
-      logger.error("getInvoicePdfUrl failed", error);
-      throw new HttpsError("internal", error.message || "Failed to generate invoice PDF");
-    }
-  }
-);

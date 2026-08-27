@@ -20,7 +20,7 @@ export function JobCardsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formData, setFormData] = useState({
-    vehicleId: '', technicianName: '', description: '', laborCost: 0 as number | ''
+    vehicleId: '', technicianName: '', description: '', laborCost: 0 as number | '', technicianPaidMonthly: false
   });
 
   const filtered = jobs.filter(j => {
@@ -44,7 +44,8 @@ export function JobCardsPage() {
       description: formData.description,
       status: 'Pending',
       partsUsed: [],
-      laborCost: Number(formData.laborCost) || 0,
+      laborCost: formData.technicianPaidMonthly ? 0 : Number(formData.laborCost) || 0,
+        technicianPaidMonthly: formData.technicianPaidMonthly,
       startedAt: new Date().toISOString(),
     };
     addJob(newJob);
@@ -150,6 +151,20 @@ export function JobCardsPage() {
               onFocus={(e) => e.target.select()}
               onChange={(e) => setFormData({...formData, laborCost: e.target.value === '' ? '' : parseFloat(e.target.value)})}
             />
+                <label className="flex items-start gap-2 mt-2 p-2 rounded-lg bg-blue-50 border border-blue-100 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 w-4 h-4 accent-blue-600"
+                    checked={formData.technicianPaidMonthly}
+                    onChange={(e) => setFormData({...formData, technicianPaidMonthly: e.target.checked})}
+                  />
+                  <span>
+                    <span className="block text-xs font-bold text-gray-800">Paid a monthly salary</span>
+                    <span className="block text-[11px] text-gray-500">
+                      Already paid monthly, so this job costs nothing in labour.
+                    </span>
+                  </span>
+                </label>
           </div>
           <div className="flex justify-end gap-3 pt-4">
             <Button type="button" variant="outline" onClick={() => setIsModalOpen(false)}>Cancel</Button>

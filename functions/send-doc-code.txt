@@ -1,0 +1,68 @@
+﻿
+      try {
+          const pdfBuffer = await generateInvoicePdf(garageName, 
+client.name || "", client.email || "", after.id || event.params.invoiceId, 
+vehiclePlate, vehicleMakeModel, vehicleYear, after.lineItems || [], 
+after.laborCost || 0, taxRate, (garage === null || garage === void 0 ? void 
+0 : garage.currency) || "RWF");
+          // Keep the Storage upload for record-keeping, but send the
+>         // WhatsApp document as base64 directly â€” OpenWA's in-browser
+          // fetch cannot reliably download external URLs even though the
+          // same URL is fetchable via curl on the same VM.
+          await uploadInvoicePdfAndGetUrl(pdfBuffer, garageId, 
+event.params.invoiceId);
+          const sessionId = await getGarageSessionId(garageId);
+          await ensureSessionActive(sessionId);
+>         await sendWhatsAppTemplate(openwaApiKey.value(), sessionId, 
+formatPhone(client.phone), client.name || "", after.id || 
+event.params.invoiceId, `${total.toLocaleString()} ${(garage === null || 
+garage === void 0 ? void 0 : garage.currency) || "RWF"}`, 
+pdfBuffer.toString("base64"));
+          logger.info("WhatsApp paid notification sent", { garageId, 
+clientId });
+          // Only charge the client quota after a confirmed successful send 
+â€”
+          // a failed send must never consume the 1000-message allowance.
+      });
+      return url;
+  }
+> async function sendWhatsAppTemplateOnce(apiKey, sessionId, toPhone, 
+caption, invoiceNumber, pdfBase64) {
+      return fetchWithTimeout(`${openwaUrl.value()}/api/sessions/${sessionId
+}/messages/send-document`, {
+          method: "POST",
+          headers: { "X-API-Key": apiKey, "Content-Type": 
+"application/json" },
+          body: JSON.stringify({
+              chatId: toChatId(toPhone),
+>             base64: pdfBase64,
+              filename: `invoice-${invoiceNumber}.pdf`,
+>             mimetype: "application/pdf",
+>             caption,
+          }),
+      }, 30000);
+  }
+  // Same OpenWA engine bug that hits sendWhatsAppText also hits document
+  // sends (confirmed via container logs: "Error downloading media" fires
+  // on this exact call). Retry once on 5xx before giving up.
+> async function sendWhatsAppTemplate(apiKey, sessionId, toPhone, 
+customerName, invoiceNumber, amountText, pdfBase64) {
+>     const caption = `Hi ${customerName}, your invoice ${invoiceNumber} 
+for ${amountText} has been paid. Thank you!`;
+      const delaysMs = [8000, 8000, 15000, 25000];
+>     let res = await sendWhatsAppTemplateOnce(apiKey, sessionId, toPhone, 
+caption, invoiceNumber, pdfBase64);
+      for (let i = 0; !res.ok && res.status >= 500 && i < delaysMs.length; 
+i++) {
+          const body = await res.text().catch(() => "");
+          logger.warn(`OpenWA document send returned 5xx (attempt ${i + 
+1}/${delaysMs.length}), body: ${body}`, { status: res.status });
+          await new Promise((resolve) => setTimeout(resolve, delaysMs[i]));
+>         res = await sendWhatsAppTemplateOnce(apiKey, sessionId, toPhone, 
+caption, invoiceNumber, pdfBase64);
+      }
+      if (!res.ok) {
+          throw new Error(`OpenWA document send failed after retries: 
+${await res.text()}`);
+
+

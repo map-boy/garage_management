@@ -1,35 +1,153 @@
 rules_version = '2';
+
+// Security model
+// --------------
+// Firestore ORs matching allow rules. A `match /{document=**} { allow …: if
+// false; }` therefore denies nothing — it only looks like a lock. Access is
+// denied by default when no rule grants, so there is no deny-all here.
+//
+// Role BOSS (the web admin) is granted read+write on every path. Staff stay
+// confined to their garage. Server-owned fields (quota, WhatsApp session,
+// invoice delivery flags, the audit log) stay locked for staff; Cloud
+// Functions still bypass rules via the Admin SDK.
+
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function userGarageId() {
+      return userProfile().garageId;
+    }
+
+    function userRole() {
+      return userProfile().role;
+    }
+
+    function isSuper() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userRole() == 'BOSS';
+    }
+
+    // A BOSS oversees every garage; everyone else is confined to their own.
+    function belongsToGarage(garageId) {
+      return isSignedIn() && (userGarageId() == garageId || isSuper());
+    }
+
+    function isStaffRole() {
+      return userRole() in [
+        'owner', 'manager', 'technician', 'receptionist',
+        'store_keeper', 'cashier', 'BOSS'
+      ];
+    }
+
+    function isManagerRole() {
+      return userRole() in ['owner', 'manager', 'BOSS'];
+    }
+
+    // True when an update touches none of `fields` — added, removed, or
+    // altered. affectedKeys() covers all three, which a value comparison
+    // alone would miss (a deleted field compares as absent, not changed).
+    function unchangedAll(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys()
+        .hasAny(fields.toSet());
+    }
+
+    // Web admin: unrestricted. Must be a real users/{uid} with role BOSS.
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if isSuper();
     }
 
-    function isSignedIn() { return request.auth != null; }
-    function userProfile() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
-    function userGarageId() { return userProfile().garageId; }
-    function userRole() { return userProfile().role; }
-    function belongsToGarage(garageId) { return isSignedIn() && userGarageId() == garageId; }
-    function isStaffRole() { return userRole() in ['owner','manager','technician','receptionist','store_keeper','cashier','BOSS']; }
-
+    // ---- Users -------------------------------------------------------
     match /users/{userId} {
-      allow get: if isSignedIn() && request.auth.uid == userId;
-      allow create: if isSignedIn() && request.auth.uid == userId;
-      allow update: if isSignedIn() && request.auth.uid == userId
-                    && request.resource.data.garageId == resource.data.garageId
-                    && request.resource.data.role == resource.data.role;
+      allow get: if isSignedIn() && (request.auth.uid == userId || isSuper());
+      allow create: if isSignedIn()
+                    && request.auth.uid == userId
+                    && request.resource.data.garageId is string
+                    && request.resource.data.role is string
+                    // A self-created profile may never mint a BOSS.
+                    && request.resource.data.role != 'BOSS';
+      // Role and garage are identity, not preferences: changing either is
+      // privilege escalation, so both are pinned to their stored values.
+      allow update: if isSignedIn()
+                    && request.auth.uid == userId
+                    && unchangedAll(['garageId', 'role']);
     }
 
+    // ---- Garages -----------------------------------------------------
     match /garages/{garageId} {
+      function serverOwnedGarageFields() {
+        return [
+          'whatsappMessagesUsed',
+          'whatsappMessagesLimit',
+          'whatsappQuotaPeriod',
+          'whatsappQuotaUpdatedAt',
+          'whatsappSessionId',
+          'whatsappSessionStatus',
+          'whatsappSessionPhone',
+          'whatsappSessionCheckedAt',
+          'ownerId'
+        ];
+      }
+
       allow read: if belongsToGarage(garageId);
-      allow create: if isSignedIn() && request.auth.uid == garageId;
-      allow update: if belongsToGarage(garageId) && isStaffRole();
+      allow create: if isSignedIn()
+                    && request.auth.uid == garageId
+                    && request.resource.data.ownerId == request.auth.uid
+                    && !request.resource.data.keys().hasAny([
+                      'whatsappMessagesUsed', 'whatsappMessagesLimit',
+                      'whatsappSessionId'
+                    ]);
+      allow update: if belongsToGarage(garageId)
+                    && isStaffRole()
+                    && unchangedAll(serverOwnedGarageFields());
+      allow delete: if false;
+
+      match /invoices/{invoiceId} {
+        allow read: if belongsToGarage(garageId);
+        allow create: if belongsToGarage(garageId) && isStaffRole()
+                      && !request.resource.data.keys()
+                        .hasAny(['whatsappPaid', 'whatsappIssued']);
+        allow update: if belongsToGarage(garageId) && isStaffRole()
+                      && unchangedAll(['whatsappPaid', 'whatsappIssued']);
+        allow delete: if belongsToGarage(garageId) && isManagerRole();
+      }
+
+      match /whatsappLogs/{logId} {
+        allow read: if belongsToGarage(garageId) && isManagerRole();
+        allow write: if false;
+      }
+
+      match /archives/{archiveId}/records/{chunkId} {
+        allow read: if belongsToGarage(garageId);
+        allow write: if belongsToGarage(garageId) && isManagerRole();
+      }
 
       match /{collectionName}/{docId} {
-        allow read: if belongsToGarage(garageId);
-        allow write: if belongsToGarage(garageId) && isStaffRole();
+        function hasOwnWriteRule() {
+          return collectionName in ['invoices', 'whatsappLogs'];
+        }
+
+        function hasOwnReadRule() {
+          return collectionName == 'whatsappLogs';
+        }
+
+        allow read: if belongsToGarage(garageId) && !hasOwnReadRule();
+        allow write: if belongsToGarage(garageId)
+                     && isStaffRole()
+                     && !hasOwnWriteRule();
       }
+    }
+
+    match /system/{docId} {
+      allow read, write: if false;
     }
   }
 }
-

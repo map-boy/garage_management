@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useInvoices } from '../hooks/useInvoices';
 import { useClients } from '../hooks/useClients';
@@ -70,8 +70,7 @@ export function InvoicesPage() {
         <Table headers={['Invoice #', 'Client', 'Date', 'Total Amount', 'Status', 'Actions']}>
           {filtered.map((inv) => {
             const client = clients.find(c => c.id === inv.clientId);
-            const subtotal = inv.lineItems.reduce((acc, item) => acc + (item.qty * item.unitCost), 0) + inv.laborCost;
-            const total = subtotal * (1 + inv.taxRate);
+            const total = inv.lineItems.reduce((acc, item) => acc + (item.qty * item.unitCost), 0) + inv.laborCost;
 
             return (
               <TableRow key={inv.id} onClick={() => navigate(`/invoices/${inv.id}`)}>

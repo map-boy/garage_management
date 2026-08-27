@@ -7,6 +7,7 @@ import { useStock } from '../hooks/useStock';
 import { useInvoices } from '../hooks/useInvoices';
 import { JobStatusBadge } from '../components/jobs/JobStatusBadge';
 import { PartsUsedTable } from '../components/jobs/PartsUsedTable';
+import { JobFreeServices } from '../components/jobs/JobFreeServices';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Modal } from '../components/ui/Modal';
@@ -50,7 +51,7 @@ export function JobCardDetailPage() {
     updateJob({
       ...job,
       status: newStatus,
-      completedAt: newStatus === 'Completed' ? new Date().toISOString() : job.completedAt
+      completedAt: newStatus === 'Completed' ? new Date().toISOString() : (job.completedAt ?? null)
     });
   };
 
@@ -92,9 +93,9 @@ export function JobCardDetailPage() {
       id: `INV-${generateId()}`,
       jobId: job.id,
       clientId: client?.id || '',
-      lineItems,
-      laborCost: job.laborCost,
-      taxRate: settingsService.get().taxRate,
+      lineItems: [...lineItems, ...(job.freeServices ?? []).map(f => ({ description: f.description, qty: 1, unitCost: f.cost || 0, isFree: true }))],
+      laborCost: job.technicianPaidMonthly ? 0 : job.laborCost,
+      taxRate: 0,
       status: 'Unpaid',
       issuedAt: new Date().toISOString()
     };
@@ -124,6 +125,11 @@ export function JobCardDetailPage() {
     const p = stock.find(part => part.id === item.partId);
     return acc + (item.quantity * (p?.unitCost || 0));
   }, 0);
+
+  // Free services are free to the CLIENT, not to the garage. Their cost is
+  // real money spent on this vehicle that never comes back, so it belongs in
+  // the spend total alongside parts and labour.
+  const totalFreeCost = (job.freeServices ?? []).reduce((acc, f) => acc + (f.cost || 0), 0);
 
   return (
     <div className="space-y-6 pb-20">
@@ -190,6 +196,7 @@ export function JobCardDetailPage() {
                   onUpdateQty={handleUpdatePartQty}
                   onRemove={handleRemovePart}
                 />
+          <JobFreeServices job={job} onChange={updateJob} editable={job.status !== 'Completed'} />
               </div>
             </div>
           </div>
@@ -244,11 +251,17 @@ export function JobCardDetailPage() {
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-blue-100">Labor Charge</span>
-                <span className="font-bold">{formatCurrency(job.laborCost)}</span>
+                <span className="font-bold">{job.technicianPaidMonthly ? 'Covered by salary' : formatCurrency(job.laborCost)}</span>
               </div>
+              {totalFreeCost > 0 && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-blue-100">Free services absorbed</span>
+                  <span className="font-bold text-amber-200">{formatCurrency(totalFreeCost)}</span>
+                </div>
+              )}
               <div className="pt-4 border-t border-blue-500 flex justify-between items-baseline">
                 <span className="text-sm font-bold">Estimated Total</span>
-                <span className="text-2xl font-black">{formatCurrency(totalPartsCost + job.laborCost)}</span>
+                <span className="text-2xl font-black">{formatCurrency(totalPartsCost + (job.technicianPaidMonthly ? 0 : job.laborCost) + totalFreeCost)}</span>
               </div>
             </div>
 
@@ -280,7 +293,7 @@ export function JobCardDetailPage() {
               <option value="">Select a part</option>
               {stock.map(p => (
                 <option key={p.id} value={p.id} disabled={p.quantity <= 0}>
-                  {p.name} — ({p.quantity} available) — {formatCurrency(p.unitCost)}
+                  {p.name} - ({p.quantity} available) - {formatCurrency(p.unitCost)}
                 </option>
               ))}
             </select>

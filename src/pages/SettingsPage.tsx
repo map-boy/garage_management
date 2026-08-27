@@ -156,15 +156,6 @@ export function SettingsPage() {
                 onChange={(e) => setSettings({ ...settings, currency: e.target.value.toUpperCase() })}
               />
             </div>
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Tax Rate (%)</label>
-              <input
-                type="number" required min={0} max={100} step={0.5}
-                className="w-full p-2.5 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-hidden"
-                value={settings.taxRate * 100}
-                onChange={(e) => setSettings({ ...settings, taxRate: (parseFloat(e.target.value) || 0) / 100 })}
-              />
-            </div>
           </div>
 
           <div className="pt-4 border-t border-gray-50 space-y-4">
